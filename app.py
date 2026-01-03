@@ -19,7 +19,7 @@ if "APP_PASSWORD" in st.secrets:
     password = st.sidebar.text_input("パスワードを入力してください", type="password")
     if password != st.secrets["APP_PASSWORD"]:
         st.warning("正しいパスワードを入力するまで機能は制限されます。")
-        st.stop()  # ここで処理を止める（これより下のコードは実行されない）
+        st.stop()  # ここで処理を止める
 else:
     st.error("設定エラー: Secretsに 'APP_PASSWORD' を設定してください。")
     st.stop()
@@ -58,16 +58,16 @@ def save_to_google_sheets(data):
     client = gspread.authorize(creds)
 
     try:
-        # シート名も直書きせず、エラーハンドリングする
-        sheet_name = "Kakeibo_DB" 
-        sheet = client.open(sheet_name).sheet1
+        # ★修正箇所: 名前検索ではなくID指定で開く（安定性向上）
+        spreadsheet_id = st.secrets["SPREADSHEET_ID"]
+        sheet = client.open_by_key(spreadsheet_id).sheet1
         
         # 行を追加: [日付, 店名, カテゴリ, 金額, 登録日時]
         row = [data['date'], data['store'], data['category'], data['amount'], str(datetime.now())]
         sheet.append_row(row)
         return True
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"エラー: スプレッドシート '{sheet_name}' が見つかりません。名前を確認してください。")
+    except KeyError:
+        st.error("Secretsに 'SPREADSHEET_ID' が設定されていません。")
         return False
     except Exception as e:
         st.error(f"スプレッドシートへの保存に失敗しました: {e}")
@@ -119,11 +119,17 @@ elif menu == "データ確認":
         client = gspread.authorize(creds)
         
         try:
-            sheet = client.open("Kakeibo_DB").sheet1
+            # ★修正箇所: 名前検索ではなくID指定で開く
+            spreadsheet_id = st.secrets["SPREADSHEET_ID"]
+            sheet = client.open_by_key(spreadsheet_id).sheet1
+            
             # 全データを取得してDataFrame化
             data = sheet.get_all_records()
             df = pd.DataFrame(data)
             return df
+        except KeyError:
+            st.error("Secretsに 'SPREADSHEET_ID' が設定されていません。")
+            return None
         except Exception as e:
             st.error(f"データの読み込みに失敗しました: {e}")
             return None
@@ -145,15 +151,17 @@ elif menu == "データ確認":
         
         # 3. カテゴリ別集計のグラフ表示
         st.write("### 🥧 カテゴリ別支出")
-        category_sum = df.groupby('category')['amount'].sum().reset_index()
-        
-        # シンプルな棒グラフ
-        st.bar_chart(category_sum.set_index('category'))
+        if 'category' in df.columns and 'amount' in df.columns:
+            category_sum = df.groupby('category')['amount'].sum().reset_index()
+            
+            # シンプルな棒グラフ
+            st.bar_chart(category_sum.set_index('category'))
 
-        # 合計金額の表示
-        total_spend = df['amount'].sum()
-        st.metric(label="総支出額", value=f"¥{total_spend:,.0f}")
+            # 合計金額の表示
+            total_spend = df['amount'].sum()
+            st.metric(label="総支出額", value=f"¥{total_spend:,.0f}")
+        else:
+            st.warning("データ形式エラー: 'category' または 'amount' 列が見つかりません。スプレッドシートの1行目を確認してください。")
         
     else:
         st.info("データがまだありません。レシートを登録してください。")
-
