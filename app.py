@@ -110,4 +110,50 @@ if menu == "レシート登録":
 
 elif menu == "データ確認":
     st.subheader("📊 最新の支出データ")
-    st.info("※ここにスプレッドシートのデータを読み込んでグラフ表示します（今回は枠組みのみ）")
+    
+    # スプレッドシートからの読み込み関数
+    def load_data():
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        try:
+            sheet = client.open("Kakeibo_DB").sheet1
+            # 全データを取得してDataFrame化
+            data = sheet.get_all_records()
+            df = pd.DataFrame(data)
+            return df
+        except Exception as e:
+            st.error(f"データの読み込みに失敗しました: {e}")
+            return None
+
+    # データ表示処理
+    if st.button("データを更新"):
+        st.cache_data.clear() # キャッシュクリア
+
+    df = load_data()
+
+    if df is not None and not df.empty:
+        # 1. データフレームの表示
+        st.write("### 📝 登録明細")
+        st.dataframe(df)
+
+        # 2. 分析用データの加工 (数値変換など)
+        # amount列を数値に変換（'円'やカンマが入っている場合の対策）
+        df['amount'] = pd.to_numeric(df['amount'].astype(str).str.replace(',', '').str.replace('円', ''), errors='coerce')
+        
+        # 3. カテゴリ別集計のグラフ表示
+        st.write("### 🥧 カテゴリ別支出")
+        category_sum = df.groupby('category')['amount'].sum().reset_index()
+        
+        # シンプルな棒グラフ
+        st.bar_chart(category_sum.set_index('category'))
+
+        # 合計金額の表示
+        total_spend = df['amount'].sum()
+        st.metric(label="総支出額", value=f"¥{total_spend:,.0f}")
+        
+    else:
+        st.info("データがまだありません。レシートを登録してください。")
+
