@@ -5,46 +5,80 @@ import base64
 from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import traceback
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI家計簿", layout="wide")
-st.title("💰 AI資産管理マネージャー")
 
 # ==========================================
-# 🔐 セキュリティ対策
+# ① パスワード入力画面の改善 (スマホ対応)
 # ==========================================
+# CSSで入力フォームを大きくする
+st.markdown("""
+<style>
+    /* パスワード入力欄を大きくする */
+    div[data-testid="stTextInput"] input {
+        font-size: 20px;
+        padding: 15px;
+    }
+    /* ボタンも大きくする */
+    div[data-testid="stButton"] button {
+        height: 3em;
+        font-size: 18px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# 認証ロジック
 if "APP_PASSWORD" in st.secrets:
-    password = st.sidebar.text_input("パスワードを入力してください", type="password")
-    if password != st.secrets["APP_PASSWORD"]:
-        st.warning("正しいパスワードを入力するまで機能は制限されます。")
-        st.stop()
+    # 認証済みかどうかのフラグ
+    if 'authenticated' not in st.session_state:
+        st.session_state['authenticated'] = False
+
+    if not st.session_state['authenticated']:
+        st.title("🔐 ログイン")
+        st.write("パスワードを入力してください")
+        # サイドバーではなくメイン画面に表示して大きく見やすくする
+        password = st.text_input("Password", type="password", key="login_pass")
+        
+        if st.button("ログイン"):
+            if password == st.secrets["APP_PASSWORD"]:
+                st.session_state['authenticated'] = True
+                st.rerun() # 画面をリロードしてメイン画面へ
+            else:
+                st.error("パスワードが違います")
+        st.stop() # 認証前はここで処理を止める
 else:
     st.error("設定エラー: Secretsに 'APP_PASSWORD' を設定してください。")
     st.stop()
 
-# --- サイドバー：設定 ---
+# --- 認証通過後のメイン処理 ---
+st.title("💰 AI資産管理マネージャー")
+
+# --- サイドバー ---
 st.sidebar.header("機能メニュー")
 menu = st.sidebar.radio("選択してください", ["レシート登録", "データ確認"])
 
 # --- Session State初期化 ---
-if 'input_date' not in st.session_state:
-    st.session_state['input_date'] = date.today()
-if 'input_store' not in st.session_state:
-    st.session_state['input_store'] = ""
-if 'input_amount' not in st.session_state:
-    st.session_state['input_amount'] = 0
-if 'input_category' not in st.session_state:
-    st.session_state['input_category'] = "食費"
-if 'raw_response' not in st.session_state:
-    st.session_state['raw_response'] = ""
+if 'input_date' not in st.session_state: st.session_state['input_date'] = date.today()
+if 'input_store' not in st.session_state: st.session_state['input_store'] = ""
+if 'input_amount' not in st.session_state: st.session_state['input_amount'] = 0
+if 'input_category' not in st.session_state: st.session_state['input_category'] = "食費"
+if 'input_member' not in st.session_state: st.session_state['input_member'] = "マサ" # 初期値
+
+# --- 定数定義: カテゴリとメンバー ---
+CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "その他"]
+MEMBERS = ["マサ", "ユウ", "ハル"]
 
 # --- 関数: OpenAI解析 ---
 def analyze_receipt(image_bytes):
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    system_prompt = "レシート画像からdate(YYYY-MM-DD),store,amount(数値),category(食費/日用品/交通費/娯楽/その他)をJSONで抽出せよ。"
+    
+    # プロンプト更新: 新しいカテゴリ定義をAIに伝える
+    categories_str = "/".join(CATEGORIES)
+    system_prompt = f"レシート画像からdate(YYYY-MM-DD),store,amount(数値),category({categories_str})をJSONで抽出せよ。"
 
     try:
         response = client.chat.completions.create(
@@ -72,8 +106,16 @@ def save_to_google_sheets(data):
         spreadsheet_id = st.secrets["SPREADSHEET_ID"]
         sheet = client.open_by_key(spreadsheet_id).sheet1
         
-        # 保存する列の順番: [日付, 店名, カテゴリ, 金額, 登録日時]
-        row = [str(data['date']), data['store'], data['category'], data['amount'], str(datetime.now())]
+        # ★変更: 保存カラムに「対象者(member)」を追加
+        # [日付, 店名, カテゴリ, 金額, 対象者, タイムスタンプ]
+        row = [
+            str(data['date']), 
+            data['store'], 
+            data['category'], 
+            data['amount'], 
+            data['member'], 
+            str(datetime.now())
+        ]
         sheet.append_row(row)
         return True
     except KeyError:
@@ -83,6 +125,17 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         st.text(traceback.format_exc())
         return False
+
+# --- 関数: 会計月の計算 (25日締め) ---
+def get_fiscal_month(date_obj):
+    # 25日以降なら翌月扱いにする
+    # 例: 1/24 -> 1月, 1/25 -> 2月
+    if date_obj.day >= 25:
+        # 翌月の1日に移動してからフォーマット
+        next_month = (date_obj.replace(day=1) + pd.DateOffset(months=1))
+        return next_month.strftime('%Y-%m')
+    else:
+        return date_obj.strftime('%Y-%m')
 
 # ==========================================
 # 1. レシート登録画面
@@ -96,11 +149,10 @@ if menu == "レシート登録":
     if uploaded_file is not None:
         st.image(uploaded_file, caption="アップロード画像", width=300)
         
-        if st.button("🤖 AI解析開始 (自動入力)"):
+        if st.button("🤖 AI解析開始"):
             with st.spinner("AIが読み取っています..."):
                 bytes_data = uploaded_file.getvalue()
                 result_json, raw_text = analyze_receipt(bytes_data)
-                st.session_state['raw_response'] = raw_text
 
                 if result_json:
                     st.success("読み取り成功！")
@@ -109,7 +161,17 @@ if menu == "レシート登録":
                             st.session_state['input_date'] = datetime.strptime(result_json["date"], "%Y-%m-%d").date()
                         st.session_state['input_store'] = result_json.get("store", "")
                         st.session_state['input_amount'] = int(result_json.get("amount", 0))
-                        st.session_state['input_category'] = result_json.get("category", "その他")
+                        
+                        # カテゴリのマッチング
+                        ai_cat = result_json.get("category", "その他")
+                        # 部分一致などで既存カテゴリに寄せる
+                        matched = "その他"
+                        for cat in CATEGORIES:
+                            if cat in ai_cat:
+                                matched = cat
+                                break
+                        st.session_state['input_category'] = matched
+                        
                     except:
                         pass
                 else:
@@ -125,57 +187,45 @@ if menu == "レシート登録":
         input_store = col2.text_input("店名", value=st.session_state['input_store'])
         input_amount = col1.number_input("金額", min_value=0, value=st.session_state['input_amount'])
         
-        # --- ★変更点1: カテゴリ手動追加機能 ---
-        # 既存リスト + 新規追加オプション
-        base_categories = ["食費", "日用品", "交通費", "娯楽", "教育費", "投資", "その他"]
-        
-        # SessionStateのカテゴリがリストになければ「その他」にする（エラー回避）
-        current_cat = st.session_state['input_category']
-        if current_cat not in base_categories:
-            # もしAIが未知のカテゴリを出したら「その他」扱いにするか、リストに追加して表示するか
-            # ここではシンプルにリストに一時的に追加して表示
-            if current_cat: 
-                base_categories.append(current_cat)
-            else:
-                current_cat = "その他"
-
-        # 選択肢の末尾に「➕ 手入力 (新規作成)」を追加
-        select_options = base_categories + ["➕ 手入力 (新規作成)"]
-        
-        # インデックスの決定
+        # ★変更: カテゴリ選択 (手動追加付き)
+        select_options = CATEGORIES + ["➕ 手入力 (新規作成)"]
         try:
-            default_index = select_options.index(current_cat)
-        except ValueError:
-            default_index = select_options.index("その他")
+            default_idx = select_options.index(st.session_state['input_category'])
+        except:
+            default_idx = select_options.index("その他")
+            
+        selected_cat = col2.selectbox("カテゴリ", select_options, index=default_idx)
+        
+        if selected_cat == "➕ 手入力 (新規作成)":
+            final_category = col2.text_input("カテゴリ名を入力", value="")
+        else:
+            final_category = selected_cat
 
-        selected_option = col2.selectbox("カテゴリ選択", select_options, index=default_index)
-        
-        # 「手入力」が選ばれたらテキストボックスを表示
-        final_category = selected_option
-        if selected_option == "➕ 手入力 (新規作成)":
-            final_category = col2.text_input("新しいカテゴリ名を入力してください", value="")
-        
+        # ★変更: 対象者（メンバー）選択プルダウン
+        input_member = col1.selectbox("対象者", MEMBERS, index=MEMBERS.index(st.session_state['input_member']) if st.session_state['input_member'] in MEMBERS else 0)
+
         submitted = st.form_submit_button("✅ 登録する")
         
         if submitted:
-            if final_category == "" or final_category == "➕ 手入力 (新規作成)":
-                st.error("カテゴリ名を入力してください")
+            if not final_category:
+                st.error("カテゴリ名は必須です")
             else:
                 final_data = {
                     "date": input_date,
                     "store": input_store,
                     "amount": input_amount,
-                    "category": final_category
+                    "category": final_category,
+                    "member": input_member
                 }
                 if save_to_google_sheets(final_data):
                     st.balloons()
-                    st.success(f"登録完了: {final_category} / ¥{input_amount}")
+                    st.success(f"登録完了: {final_category} ({input_member}) / ¥{input_amount}")
 
 # ==========================================
-# 2. データ確認画面 (修正版)
+# 2. データ確認画面 (25日締め集計)
 # ==========================================
 elif menu == "データ確認":
-    st.subheader("📊 最新の支出データ")
+    st.subheader("📊 月別・対象者別 集計")
     
     if st.button("データを更新"):
         st.cache_data.clear()
@@ -190,28 +240,26 @@ elif menu == "データ確認":
         try:
             spreadsheet_id = st.secrets["SPREADSHEET_ID"]
             sheet = client.open_by_key(spreadsheet_id).sheet1
-            
-            # get_all_values で「文字列のリスト」として取得（ヘッダー問題を回避するため）
             data = sheet.get_all_values()
             
-            # データが1行（ヘッダーのみ）以下の場合は空とみなす
-            if len(data) <= 1:
-                return pd.DataFrame()
+            if len(data) <= 1: return pd.DataFrame()
 
-            # DataFrame化（1行目をヘッダーとして扱うのではなく、強制的に列名を割り当てる）
-            # ★変更点2: 列ズレ対策のため、列名を強制指定
-            df = pd.DataFrame(data[1:]) # 1行目はスキップ（またはデータとして扱う）
+            # データフレーム化 (列数が変わっても対応できるようにロジック修正)
+            df = pd.DataFrame(data[1:]) 
             
-            # スプレッドシートの列数が足りない場合の対策
-            expected_cols = ["date", "store", "category", "amount", "timestamp"]
-            current_cols = df.shape[1]
+            # 列定義: 
+            # 旧データ(5列): [date, store, category, amount, timestamp]
+            # 新データ(6列): [date, store, category, amount, member, timestamp]
             
-            if current_cols >= 5:
-                df = df.iloc[:, :5] # 最初の5列だけ使う
-                df.columns = expected_cols
+            # 列数が5なら「member」列を空で挿入して6列に合わせる
+            if df.shape[1] == 5:
+                df.columns = ["date", "store", "category", "amount", "timestamp"]
+                df["member"] = "-" # 旧データはメンバー不明
+            elif df.shape[1] >= 6:
+                df = df.iloc[:, :6]
+                df.columns = ["date", "store", "category", "amount", "member", "timestamp"]
             else:
-                st.error(f"データの列数が足りません（現在{current_cols}列）。A〜E列までデータが入っているか確認してください。")
-                return pd.DataFrame()
+                return pd.DataFrame() # 列不足
 
             return df
         except Exception as e:
@@ -221,31 +269,51 @@ elif menu == "データ確認":
     df = load_data()
 
     if df is not None and not df.empty:
-        # --- データ前処理 (金額の数値化) ---
-        # カンマや円マークを除去し、数値に変換できないものは 0 にする
+        # --- データ前処理 ---
+        # 1. 金額の数値化
         df['amount'] = pd.to_numeric(
             df['amount'].astype(str).str.replace(',', '').str.replace('円', ''), 
             errors='coerce'
         ).fillna(0).astype(int)
 
-        # 1. サマリー表示
-        total_spend = df['amount'].sum()
+        # 2. 日付型変換
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date']) # 日付がないデータは除外
+
+        # 3. 会計月（Fiscal Month）の計算: 25日締め
+        # applyを使って1行ずつ判定
+        df['fiscal_month'] = df['date'].apply(get_fiscal_month)
+
+        # --- 表示コントロール ---
+        # 月の選択リスト（新しい順）
+        month_list = sorted(df['fiscal_month'].unique(), reverse=True)
+        selected_month = st.selectbox("集計する月を選択 (25日〜翌24日)", month_list)
+
+        # 選択された月のデータのみ抽出
+        month_df = df[df['fiscal_month'] == selected_month]
+
+        # --- サマリー ---
+        total_spend = month_df['amount'].sum()
+        st.divider()
+        col1, col2, col3 = st.columns(3)
+        col1.metric(f"{selected_month}月度の総支出", f"¥{total_spend:,}")
+        col2.metric("データ件数", f"{len(month_df)} 件")
         
-        col1, col2 = st.columns(2)
-        col1.metric("💰 総支出額", f"¥{total_spend:,}")
-        col2.metric("🧾 登録件数", f"{len(df)} 件")
+        # --- グラフ1: カテゴリ別 ---
+        st.write("### 🥧 カテゴリ別支出")
+        cat_sum = month_df.groupby('category')['amount'].sum().reset_index().sort_values('amount', ascending=False)
+        st.bar_chart(cat_sum.set_index('category'))
 
-        # 2. カテゴリ別グラフ
-        st.write("### 🥧 カテゴリ別構成")
-        if total_spend > 0:
-            category_sum = df.groupby('category')['amount'].sum().reset_index().sort_values('amount', ascending=False)
-            st.bar_chart(category_sum.set_index('category'))
-        else:
-            st.info("金額データが集計できませんでした。数値が正しく登録されているか確認してください。")
+        # --- グラフ2: 人別 (対象者別) ---
+        st.write("### 👤 対象者別支出")
+        if 'member' in month_df.columns:
+            mem_sum = month_df.groupby('member')['amount'].sum().reset_index().sort_values('amount', ascending=False)
+            # 円グラフ風にしたいがStreamlit標準は棒グラフが見やすい
+            st.bar_chart(mem_sum.set_index('member'))
 
-        # 3. 明細表
-        st.write("### 📝 最近の明細")
-        st.dataframe(df.sort_values('date', ascending=False))
+        # --- 明細表 ---
+        st.write("### 📝 詳細データ")
+        st.dataframe(month_df.sort_values('date', ascending=False))
         
     else:
-        st.info("データがまだありません。レシートを登録してください。")
+        st.info("データがありません。")
