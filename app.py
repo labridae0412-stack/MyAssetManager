@@ -6,6 +6,7 @@ from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, date
+import traceback  # ★追加: エラー詳細表示用
 
 # --- ページ設定 ---
 st.set_page_config(page_title="AI家計簿", layout="wide")
@@ -46,7 +47,7 @@ def analyze_receipt(image_bytes):
     
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-    # ★修正1: プロンプトを極限まで短縮してコスト削減
+    # プロンプトを極限まで短縮してコスト削減
     system_prompt = "レシート画像からdate(YYYY-MM-DD),store,amount(数値),category(食費/日用品/交通費/その他)をJSONで抽出せよ。"
 
     try:
@@ -61,14 +62,11 @@ def analyze_receipt(image_bytes):
             response_format={"type": "json_object"}
         )
         
-        # 生のテキストデータを取得
         content = response.choices[0].message.content
         
-        # 空レスポンス対策
         if not content:
             return None, "APIからの応答が空でした。"
 
-        # JSONパースを試みる
         data = json.loads(content)
         return data, content
 
@@ -93,7 +91,10 @@ def save_to_google_sheets(data):
         st.error("Secretsに 'SPREADSHEET_ID' が設定されていません。")
         return False
     except Exception as e:
+        # ★修正: エラーの詳細ログ(Traceback)を画面に出力する
         st.error(f"スプレッドシートへの保存に失敗しました: {e}")
+        st.text("▼ エラー詳細ログ")
+        st.text(traceback.format_exc()) 
         return False
 
 # --- メイン画面：レシート登録 ---
@@ -102,29 +103,24 @@ if menu == "レシート登録":
     
     uploaded_file = st.file_uploader("レシート画像をアップロード", type=["jpg", "png", "jpeg"])
     
-    # 画像がある場合のみ解析ボタンを表示
     if uploaded_file is not None:
         st.image(uploaded_file, caption="アップロード画像", width=300)
         
         if st.button("🤖 AI解析開始 (自動入力)"):
             with st.spinner("AIが読み取っています..."):
                 bytes_data = uploaded_file.getvalue()
-                # 解析実行
                 result_json, raw_text = analyze_receipt(bytes_data)
                 
-                # ★修正2: 生データを確認用に保存
                 st.session_state['raw_response'] = raw_text
 
                 if result_json:
                     st.success("読み取り成功！下部のフォームを確認・修正してください。")
-                    # Session Stateを更新してフォームに反映させる
                     try:
                         if result_json.get("date"):
                             st.session_state['input_date'] = datetime.strptime(result_json["date"], "%Y-%m-%d").date()
                         st.session_state['input_store'] = result_json.get("store", "")
                         st.session_state['input_amount'] = int(result_json.get("amount", 0))
                         
-                        # カテゴリのマッチング処理
                         cat = result_json.get("category", "その他")
                         if cat in ["食費", "日用品", "交通費", "その他"]:
                             st.session_state['input_category'] = cat
@@ -135,18 +131,15 @@ if menu == "レシート登録":
                 else:
                     st.error("AI解析に失敗しました。手動で入力してください。")
 
-    # ★修正2: デバッグ用表示エリア（解析結果の生データを表示）
     with st.expander("▼ 解析結果（デバッグ用・AIの思考）を確認する"):
         st.text_area("OpenAI Output", value=st.session_state['raw_response'], height=150)
 
     st.markdown("---")
     st.write("### ✏️ 登録フォーム (手動修正可能)")
 
-    # ★修正3: 常に表示されるフォーム（Session Stateと紐付け）
     with st.form("entry_form"):
         col1, col2 = st.columns(2)
         
-        # valueに st.session_state を指定することでAIの結果を反映させる
         input_date = col1.date_input("日付", value=st.session_state['input_date'])
         input_store = col2.text_input("店名", value=st.session_state['input_store'])
         input_amount = col1.number_input("金額", min_value=0, value=st.session_state['input_amount'])
@@ -165,10 +158,6 @@ if menu == "レシート登録":
             if save_to_google_sheets(final_data):
                 st.balloons()
                 st.success("スプレッドシートに保存しました！")
-                # 保存後にリセットしたければ以下を有効化
-                # st.session_state['input_store'] = ""
-                # st.session_state['input_amount'] = 0
-                # st.rerun()
 
 elif menu == "データ確認":
     st.subheader("📊 最新の支出データ")
@@ -186,6 +175,7 @@ elif menu == "データ確認":
             return pd.DataFrame(data)
         except Exception as e:
             st.error(f"データの読み込みに失敗しました: {e}")
+            st.text(traceback.format_exc()) # こちらにも詳細ログを追加
             return None
 
     if st.button("データを更新"):
@@ -197,7 +187,6 @@ elif menu == "データ確認":
         st.write("### 📝 登録明細")
         st.dataframe(df)
 
-        # 数値変換とグラフ
         if 'amount' in df.columns:
             df['amount'] = pd.to_numeric(df['amount'].astype(str).str.replace(',', '').str.replace('円', ''), errors='coerce')
             
