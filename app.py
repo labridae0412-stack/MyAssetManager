@@ -160,30 +160,49 @@ if menu == "レシート登録":
                         st.success(f"{len(result_json['items'])} 件の明細を検出しました。")
                         
                         items = result_json['items']
-                        date_val = result_json.get("date", str(date.today()))
+                        date_str = result_json.get("date", str(date.today()))
+                        
+                        # 日付文字列をパースする（失敗したら今日の日付）
+                        try:
+                            default_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                        except:
+                            default_date = date.today()
+
                         store_val = result_json.get("store", "")
                         
                         init_data = []
                         for item in items:
                             init_data.append({
-                                "利用日": date_val,
+                                "利用日": default_date,
                                 "店名": store_val,
                                 "商品名(メモ)": item.get("name", ""),
                                 "金額": item.get("amount", 0),
                                 "カテゴリ": "食費",
                                 "対象者": ""
                             })
-                        st.session_state['split_data'] = pd.DataFrame(init_data)
+                        
+                        # DataFrameを作成
+                        df_split = pd.DataFrame(init_data)
+
+                        # ★修正ポイント: 型を強制的に「日付(date)型」に変換する
+                        # これをしないと data_editor の DateColumn でエラーになることがある
+                        if not df_split.empty:
+                            df_split["利用日"] = pd.to_datetime(df_split["利用日"]).dt.date
+
+                        st.session_state['split_data'] = df_split
+
                     else:
                         st.error("明細読み取り失敗。合計モードを試してください。")
             
             if st.session_state['split_data'] is not None:
                 st.write("### 📝 明細の編集・登録")
+                
+                # data_editor 表示
                 edited_df = st.data_editor(
                     st.session_state['split_data'],
                     num_rows="dynamic",
                     column_config={
-                        "利用日": st.column_config.DateColumn("日付"),
+                        "利用日": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                         "カテゴリ": st.column_config.SelectboxColumn("カテゴリ", options=CATEGORIES+["その他"], required=True),
                         "対象者": st.column_config.SelectboxColumn("対象者", options=[""]+MEMBERS, required=False),
                         "金額": st.column_config.NumberColumn("金額", format="%d円")
@@ -307,23 +326,17 @@ elif menu == "データ確認":
 
             df = pd.DataFrame(data[1:]) 
             
-            # --- ★修正: 列ズレ補正ロジック ---
-            # 5列の場合(旧データ): [date, store, category, amount, timestamp]
+            # 列ズレ補正ロジック
             if df.shape[1] == 5:
                 df.columns = ["date", "store", "category", "amount", "timestamp"]
-                df["member"] = "" # 空のmember列を追加
-            
-            # 6列以上の場合(新旧混在):
+                df["member"] = ""
             elif df.shape[1] >= 6:
                 df = df.iloc[:, :6]
                 df.columns = ["date", "store", "category", "amount", "member", "timestamp"]
                 
-                # member列に日付(202x-...)が入っている場合はズレているので修正する関数
                 def align_row(row):
                     m = str(row['member']).strip()
-                    # もしmember列が日付形式(202x-)で始まっていたら、それはtimestampである
                     if (m.startswith("202") and "-" in m) or (m.startswith("203") and "-" in m):
-                        # ズレを修正
                         row['timestamp'] = row['member']
                         row['member'] = ""
                     return row
@@ -356,7 +369,7 @@ elif menu == "データ確認":
         else:
             df['member'] = ""
 
-        # 表示用カテゴリ作成 (memberが空ならカテゴリ名のみ)
+        # 表示用カテゴリ
         def make_display_category(row):
             cat = str(row['category'])
             mem = str(row['member'])
