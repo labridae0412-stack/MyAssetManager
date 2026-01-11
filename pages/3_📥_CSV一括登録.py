@@ -5,95 +5,99 @@ import utils
 st.set_page_config(page_title="CSV一括登録", layout="wide")
 utils.check_password()
 
-st.title("📥 銀行・カード明細の一括登録")
+# ==========================================
+# 🔒 セキュリティロック機能 (新規追加)
+# ==========================================
+# secretsに "ENVIRONMENT = 'local'" がある場合のみ通す
+env = st.secrets.get("ENVIRONMENT", "cloud")
 
-st.markdown("""
-銀行やクレジットカードのサイトからダウンロードしたCSVファイルをアップロードしてください。
-列を割り当てて、まとめて家計簿データベース(`Transaction_Log`)に登録します。
-""")
+if env != "local":
+    st.error("⛔ セキュリティ制限")
+    st.warning("""
+    **この機能はセキュリティのため、Web版（クラウド）では無効化されています。**
+    
+    銀行データの登録を行う場合は、自宅PCのローカル環境でアプリを起動してください。
+    (VSCode Terminal: `streamlit run Home.py`)
+    """)
+    st.stop() # ここで処理を強制終了し、以下の画面を表示させない
+# ==========================================
 
-# 1. ファイルアップロード
-uploaded_file = st.file_uploader("CSVファイルをドラッグ＆ドロップ", type=["csv"])
+st.title("📥 金融機関データ取込")
+st.title("📥 金融機関データ取込")
+st.markdown("各金融機関のCSVを取り込み、それぞれのデータベースへ振り分けます。")
+
+# 1. 設定選択
+col1, col2 = st.columns(2)
+institution_name = col1.selectbox("🏦 金融機関を選択", list(utils.INSTITUTION_CONFIG.keys()))
+selected_member = col2.selectbox("👤 誰のデータですか？", utils.MEMBERS, index=0) # マサをデフォルト
+
+config = utils.INSTITUTION_CONFIG[institution_name]
+target_sheet = config["sheet_name"]
+
+st.info(f"保存先DB: **{target_sheet}** / 読み込み設定: {config['encoding']}")
+
+# 2. ファイルアップロード
+uploaded_file = st.file_uploader(f"{institution_name} のCSVをアップロード", type=["csv"])
 
 if uploaded_file:
-    # CSV読み込み (エンコーディング自動判別)
     try:
-        df = pd.read_csv(uploaded_file)
-    except UnicodeDecodeError:
-        # 日本の銀行CSVによくあるShift-JISで再トライ
-        uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, encoding="shift_jis")
-
-    st.write("### プレビュー (最初の5行)")
-    st.dataframe(df.head())
-
-    st.markdown("---")
-    st.subheader("🛠 列の割り当て設定")
-    
-    # 列選択用のプルダウンを作成
-    cols = df.columns.tolist()
-    
-    col1, col2, col3 = st.columns(3)
-    date_col = col1.selectbox("「日付」の列は？", cols, index=0 if len(cols)>0 else None)
-    store_col = col2.selectbox("「利用先/摘要」の列は？", cols, index=1 if len(cols)>1 else None)
-    amount_col = col3.selectbox("「金額(出金)」の列は？", cols, index=2 if len(cols)>2 else None)
-    
-    # 追加設定
-    col1, col2 = st.columns(2)
-    default_cat = col1.selectbox("デフォルトのカテゴリ", ["その他"] + utils.CATEGORIES)
-    default_mem = col2.selectbox("デフォルトの対象者", utils.MEMBERS)
-
-    # 変換プレビューボタン
-    if st.button("変換して確認する"):
-        try:
-            # 必要な列だけ抽出して整形
-            import_df = pd.DataFrame()
-            import_df['date'] = pd.to_datetime(df[date_col], errors='coerce').dt.date
-            import_df['store'] = df[store_col].fillna("")
-            
-            # 金額のクリーニング (カンマ除去など)
-            import_df['amount'] = df[amount_col].astype(str).str.replace(',', '').str.replace('円', '')
-            import_df['amount'] = pd.to_numeric(import_df['amount'], errors='coerce').fillna(0).astype(int)
-            
-            # マイナス値の処理（支出として正の値にするか選択可能にするのが理想だが、一旦絶対値にするかそのままにするか）
-            # 今回は「出金」列を選んだと仮定し、もしマイナスで表現されている場合は正に直す処理を入れる
-            import_df['amount'] = import_df['amount'].abs()
-
-            import_df['category'] = default_cat
-            import_df['member'] = default_mem
-
-            # 日付が無効な行（合計行など）を除外
-            import_df = import_df.dropna(subset=['date'])
-
-            st.session_state['csv_import_data'] = import_df
-            st.success("変換に成功しました！下の表で内容を確認・修正してください。")
-
-        except Exception as e:
-            st.error(f"変換エラー: {e}")
-
-    # 最終確認と登録
-    if 'csv_import_data' in st.session_state:
-        st.write("### ✅ 登録データの最終確認")
-        st.info("カテゴリなどはここで直接修正できます。")
+        # 設定された文字コードで読み込み
+        df = pd.read_csv(uploaded_file, encoding=config["encoding"])
         
-        edited_df = st.data_editor(
-            st.session_state['csv_import_data'],
-            num_rows="dynamic",
-            column_config={
-                "date": st.column_config.DateColumn("日付"),
-                "category": st.column_config.SelectboxColumn("カテゴリ", options=utils.CATEGORIES + ["その他"]),
-                "member": st.column_config.SelectboxColumn("対象者", options=utils.MEMBERS),
-                "amount": st.column_config.NumberColumn("金額")
-            },
-            hide_index=True
-        )
+        # 必要な列が存在するかチェック
+        required_cols = [config["date_col"], config["store_col"], config["amount_col"]]
+        missing_cols = [c for c in required_cols if c not in df.columns]
+        
+        if missing_cols:
+            st.error(f"エラー: CSV内に以下の列名が見つかりません。\n{missing_cols}")
+            st.warning("utils.py の INSTITUTION_CONFIG の列名設定が、実際のCSVと合っているか確認してください。")
+            st.write("▼ 読み込んだCSVの列名一覧:")
+            st.write(df.columns.tolist())
+        else:
+            # データの抽出と整形
+            import_df = pd.DataFrame()
+            import_df['date'] = pd.to_datetime(df[config["date_col"]], errors='coerce').dt.date
+            import_df['store'] = df[config["store_col"]].fillna("")
+            
+            # 金額処理
+            # 文字列置換してから数値化
+            amount_series = df[config["amount_col"]].astype(str).str.replace(',', '').str.replace('円', '')
+            import_df['amount'] = pd.to_numeric(amount_series, errors='coerce').fillna(0).astype(int)
+            
+            # マイナス値の扱い（支出なら正の値に変換するなど）
+            # ここでは「絶対値」に変換して保存します（出金も入金も大きさとして扱う）
+            # ※必要であれば銀行ごとにロジックを変えられます
+            import_df['amount'] = import_df['amount'].abs()
+            
+            # 付加情報
+            import_df['category'] = "未分類" # 一旦未分類にする
+            import_df['member'] = selected_member
+            
+            # 有効な行のみ抽出
+            import_df = import_df.dropna(subset=['date'])
+            
+            st.write("### プレビュー (確認)")
+            
+            # 編集可能なテーブルで表示（ここでカテゴリ修正可能）
+            edited_df = st.data_editor(
+                import_df,
+                num_rows="dynamic",
+                column_config={
+                    "date": st.column_config.DateColumn("日付"),
+                    "category": st.column_config.SelectboxColumn("カテゴリ", options=utils.CATEGORIES + ["その他"]),
+                    "amount": st.column_config.NumberColumn("金額")
+                },
+                hide_index=True,
+                key="editor"
+            )
+            
+            if st.button(f"✅ {target_sheet} に登録実行"):
+                success, msg = utils.save_bulk_to_google_sheets(edited_df, target_sheet)
+                if success:
+                    st.balloons()
+                    st.success(f"{msg} 件のデータを {target_sheet} に登録しました！")
+                else:
+                    st.error(f"登録失敗: {msg}")
 
-        if st.button("これでデータベースに登録する"):
-            success, msg = utils.save_bulk_to_google_sheets(edited_df)
-            if success:
-                st.balloons()
-                st.success(f"{msg} 件のデータを登録しました！")
-                # 完了したらデータをクリア
-                del st.session_state['csv_import_data']
-            else:
-                st.error(f"登録失敗: {msg}")
+    except Exception as e:
+        st.error(f"読み込みエラー: {e}")
