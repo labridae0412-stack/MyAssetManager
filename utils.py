@@ -6,69 +6,25 @@ from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
+import traceback
 
 # --- 定数定義 ---
 CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "その他"]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
 
-# --- 金融機関ごとの設定（ここをCSVに合わせて調整します） ---
-# sheet_name: 保存先のシート名
-# date_col: CSV内の「日付」の列名
-# store_col: CSV内の「摘要/店名」の列名
-# amount_col: CSV内の「金額」の列名
-# encoding: 文字コード (shift_jis または utf-8)
+# ★データを保存するスプレッドシートの「シート名」
+LOG_SHEET_NAME = "Transaction_Log" 
 
+# --- 金融機関ごとの設定 (CSV用) ---
 INSTITUTION_CONFIG = {
-    "M銀行": {
-        "sheet_name": "Bank_DB",
-        "date_col": "日付",          # ★実際のCSVヘッダーに合わせて変更してください
-        "store_col": "摘要",         # ★実際のCSVヘッダーに合わせて変更してください
-        "amount_col": "お引出し額",  # ★実際のCSVヘッダーに合わせて変更してください
-        "encoding": "shift_jis"
-    },
-    "Y銀行": {
-        "sheet_name": "Bank_DB",
-        "date_col": "取引日",
-        "store_col": "お取引内容",
-        "amount_col": "出金金額",
-        "encoding": "shift_jis"
-    },
-    "R銀行": {
-        "sheet_name": "Bank_DB",
-        "date_col": "取引日",
-        "store_col": "内容",
-        "amount_col": "入出金",
-        "encoding": "utf-8"
-    },
-    "R証券": {
-        "sheet_name": "Securities_DB",
-        "date_col": "受渡日",
-        "store_col": "銘柄名",
-        "amount_col": "受渡金額",
-        "encoding": "shift_jis"
-    },
-    "Rクレ": {
-        "sheet_name": "Credit_DB",
-        "date_col": "利用日",
-        "store_col": "利用店名・商品名",
-        "amount_col": "支払総額",
-        "encoding": "utf-8" # 楽天系はUTF-8が多い傾向
-    },
-    "Mクレ": {
-        "sheet_name": "Credit_DB",
-        "date_col": "利用日",
-        "store_col": "利用店名",
-        "amount_col": "金額",
-        "encoding": "shift_jis"
-    },
-    "Iクレ": {
-        "sheet_name": "Credit_DB",
-        "date_col": "利用日",
-        "store_col": "加盟店名",
-        "amount_col": "利用金額",
-        "encoding": "shift_jis"
-    }
+    "M銀行": { "sheet_name": "Bank_DB", "date_col": "日付", "store_col": "摘要", "amount_col": "お引出し額", "encoding": "shift_jis" },
+    "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
+    "R銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "内容", "amount_col": "入出金", "encoding": "utf-8" },
+    "R証券": { "sheet_name": "Securities_DB", "date_col": "受渡日", "store_col": "銘柄名", "amount_col": "受渡金額", "encoding": "shift_jis" },
+    "Rクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "利用店名・商品名", "amount_col": "支払総額", "encoding": "utf-8" },
+    "Mクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "利用店名", "amount_col": "金額", "encoding": "shift_jis" },
+    "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "shift_jis" }
 }
 
 # --- 共通関数: パスワード認証 ---
@@ -92,28 +48,77 @@ def check_password():
             st.error("パスワードが違います")
     st.stop()
 
-# --- 関数: Google Sheets接続 ---
+# --- 関数: Google Sheets接続クライアント取得 ---
 def get_gspread_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
-# --- 関数: データ一括保存 (シート指定対応版) ---
-def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
-    """
-    Pandas DataFrameを受け取り、指定されたシートに追加する
-    """
+# --- 関数: OpenAI解析 (レシート用) ---
+def analyze_receipt(image_bytes, mode="total"):
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    categories_str = "/".join(CATEGORIES)
+    
+    if mode == "split":
+        system_prompt = f"レシート画像を解析し、JSONで出力せよ。1. date(YYYY-MM-DD), store(店名). 2. itemsリスト(name, amount). カテゴリは推測。"
+    else:
+        system_prompt = f"レシート画像からdate(YYYY-MM-DD),store,amount(数値),category({categories_str})をJSONで抽出せよ。"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o", # コスト削減時は "gpt-4o-mini"
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}
+            ],
+            response_format={"type": "json_object"}
+        )
+        content = response.choices[0].message.content
+        if not content: return None, "空の応答"
+        return json.loads(content), ""
+    except Exception as e:
+        return None, str(e)
+
+# --- 関数: データ保存 (単票・レシート用) ---
+def save_to_google_sheets(data):
     client = get_gspread_client()
     try:
         spreadsheet_id = st.secrets["SPREADSHEET_ID"]
-        
-        # シートが存在するか確認し、なければ作成するロジックを入れると親切ですが
-        # 今回は事前に作ってある前提で進めます（エラーハンドリングのみ）
+        # シート名を指定して開く (Transaction_Log)
+        try:
+            sheet = client.open_by_key(spreadsheet_id).worksheet(LOG_SHEET_NAME)
+        except:
+            # 指定シートがない場合は1枚目を開く
+            sheet = client.open_by_key(spreadsheet_id).sheet1
+
+        now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+
+        # 列順序: [日付, 店名, カテゴリ, 金額, 入力日, 対象者]
+        row = [
+            str(data['date']), 
+            data['store'], 
+            data['category'], 
+            data['amount'], 
+            now_jst,          # E列: 入力日
+            data['member']    # F列: 対象者
+        ]
+        sheet.append_row(row)
+        return True
+    except Exception as e:
+        st.error(f"保存エラー: {e}")
+        return False
+
+# --- 関数: データ一括保存 (CSV用) ---
+def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
+    client = get_gspread_client()
+    try:
+        spreadsheet_id = st.secrets["SPREADSHEET_ID"]
         try:
             sheet = client.open_by_key(spreadsheet_id).worksheet(target_sheet_name)
         except gspread.WorksheetNotFound:
-            st.error(f"エラー: スプレッドシートに '{target_sheet_name}' というシートが見つかりません。作成してください。")
+            st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
             return False, "Sheet not found"
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
@@ -134,6 +139,40 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
     except Exception as e:
         return False, str(e)
 
-# --- 他の関数（analyze_receipt等は既存のまま維持してください） ---
-# (省略: 以前のコードにある analyze_receipt, save_to_google_sheets, load_data_from_sheets, get_fiscal_month はそのまま残してください)
-# ※ load_data_from_sheets は後で「全シート結合」に対応する必要がありますが、一旦そのままでOKです。
+# --- 関数: データ読み込み (日常管理用) ---
+def load_data_from_sheets():
+    client = get_gspread_client()
+    try:
+        spreadsheet_id = st.secrets["SPREADSHEET_ID"]
+        try:
+            sheet = client.open_by_key(spreadsheet_id).worksheet(LOG_SHEET_NAME)
+        except:
+            sheet = client.open_by_key(spreadsheet_id).sheet1
+            
+        data = sheet.get_all_values()
+        if len(data) <= 1: return pd.DataFrame()
+        
+        # ヘッダー行を除いてDF化
+        df = pd.DataFrame(data[1:])
+        
+        # 列数が足りない場合のガード
+        if df.shape[1] >= 6:
+            # 列定義をスプレッドシートに合わせる
+            df = df.iloc[:, :6]
+            df.columns = ["date", "store", "category", "amount", "timestamp", "member"]
+        else:
+            # 古い形式や列不足の場合の簡易処理
+            df.columns = [f"col_{i}" for i in range(df.shape[1])]
+            
+        return df
+    except Exception as e:
+        st.error(f"読み込みエラー: {e}")
+        return None
+
+# --- 関数: 会計月計算 ---
+def get_fiscal_month(date_obj):
+    if date_obj.day >= 25:
+        next_month = (date_obj.replace(day=1) + pd.DateOffset(months=1))
+        return next_month.strftime('%Y-%m')
+    else:
+        return date_obj.strftime('%Y-%m')
