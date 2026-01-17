@@ -19,11 +19,21 @@ LOG_SHEET_NAME = "Transaction_Log"
 # --- 金融機関ごとの設定 (CSV用) ---
 INSTITUTION_CONFIG = {
     # ---------------------------------------------------------------------------
-    # 【修正箇所】実際のCSV項目名(年月日, お取り扱い内容, お引出し)に変更しました
+    # 【修正箇所】M銀行の設定を変更しました
+    # 1. store_col を "取扱詳細" に変更
+    # 2. 金額列を "expense_col"(お引出し) と "income_col"(お預入れ) の2列構成に変更
     # ---------------------------------------------------------------------------
-    "M銀行": { "sheet_name": "Bank_DB", "date_col": "年月日", "store_col": "お取り扱い内容", "amount_col": "お引出し", "encoding": "shift_jis" },
+    "M銀行": { 
+        "sheet_name": "Bank_DB", 
+        "date_col": "年月日", 
+        "store_col": "取扱詳細",   # 修正: 摘要 -> 取扱詳細
+        "expense_col": "お引出し", # 追加: 支出として登録する列
+        "income_col": "お預入れ",  # 追加: 収入として登録する列
+        # "amount_col": "..."     # 削除: 1列だけの指定は廃止
+        "encoding": "shift_jis" 
+    },
     
-    # 以下は変更なし
+    # 他の銀行は変更なし
     "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
     "R銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "内容", "amount_col": "入出金", "encoding": "utf-8" },
     "R証券": { "sheet_name": "Securities_DB", "date_col": "受渡日", "store_col": "銘柄名", "amount_col": "受渡金額", "encoding": "shift_jis" },
