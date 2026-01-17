@@ -26,7 +26,7 @@ INSTITUTION_CONFIG = {
     "M銀行": { 
         "sheet_name": "Bank_DB", 
         "date_col": "年月日", 
-        "store_col": "取扱詳細",   # 修正: 摘要 -> 取扱詳細
+        "store_col": "お取り扱い内容",   # 修正: 摘要 -> 取扱詳細
         "expense_col": "お引出し", # 追加: 支出として登録する列
         "income_col": "お預入れ",  # 追加: 収入として登録する列
         # "amount_col": "..."     # 削除: 1列だけの指定は廃止
