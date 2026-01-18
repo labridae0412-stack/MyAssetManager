@@ -25,7 +25,7 @@ if env != "local":
 # ==========================================
 st.title("📥 金融機関データ取込")
 st.markdown("各金融機関のCSVを取り込み、**収支区分(Cat1)** と **費目(Cat2)** に分けて登録します。")
-st.info("⚠️ スプレッドシートの **H列** に「金融機関」列が追加されていることを確認してください。")
+st.info("⚠️ スプレッドシートの **I列** に「残高」列が追加されていることを確認してください。")
 
 # 1. 設定選択
 col1, col2 = st.columns(2)
@@ -53,6 +53,10 @@ if uploaded_file:
         # -----------------------------------------------------
         if "expense_col" in config and "income_col" in config:
             required_cols = [config["date_col"], config["store_col"], config["expense_col"], config["income_col"]]
+            # 残高列設定があれば必須チェックに追加（なければ無視）
+            if "balance_col" in config:
+                required_cols.append(config["balance_col"])
+
             missing_cols = [c for c in required_cols if c not in df.columns]
             
             if missing_cols:
@@ -62,6 +66,15 @@ if uploaded_file:
                     date_val = pd.to_datetime(row[config["date_col"]], errors='coerce').date()
                     store_val = str(row[config["store_col"]]).strip() if pd.notna(row[config["store_col"]]) else ""
                     if pd.isna(date_val): continue
+
+                    # 残高取得（設定があり、かつ値がある場合）
+                    balance_val = None
+                    if "balance_col" in config:
+                        bal_str = str(row[config["balance_col"]]).replace(',', '').replace('円', '')
+                        try:
+                            balance_val = int(float(bal_str)) if bal_str and bal_str != 'nan' else None
+                        except:
+                            balance_val = None
 
                     # 1. 支出列チェック
                     exp_str = str(row[config["expense_col"]]).replace(',', '').replace('円', '')
@@ -78,7 +91,8 @@ if uploaded_file:
                             "category_2": "未分類",
                             "amount": abs(exp_amount),
                             "member": selected_member,
-                            "institution": institution_name # 表示確認用
+                            "institution": institution_name,
+                            "balance": balance_val
                         })
 
                     # 2. 収入列チェック
@@ -96,11 +110,12 @@ if uploaded_file:
                             "category_2": "その他",
                             "amount": abs(inc_amount),
                             "member": selected_member,
-                            "institution": institution_name
+                            "institution": institution_name,
+                            "balance": balance_val
                         })
 
         # -----------------------------------------------------
-        # B. 1列構成 (入出金が1列 or 支出のみ) の場合: 他の銀行
+        # B. 1列構成 (入出金が1列 or 支出のみ) の場合
         # -----------------------------------------------------
         else:
             required_cols = [config["date_col"], config["store_col"], config["amount_col"]]
@@ -120,15 +135,25 @@ if uploaded_file:
                     except:
                         amount_raw = 0
                     
+                    # 残高取得（設定があれば）
+                    balance_val = None
+                    if "balance_col" in config and config["balance_col"] in df.columns:
+                        bal_str = str(row[config["balance_col"]]).replace(',', '').replace('円', '')
+                        try:
+                            balance_val = int(float(bal_str)) if bal_str and bal_str != 'nan' else None
+                        except:
+                            balance_val = None
+
                     if amount_raw != 0:
                         processed_rows.append({
                             "date": date_val,
                             "store": store_val,
-                            "category_1": "支出",
+                            "category_1": "支出", # デフォルト
                             "category_2": "未分類",
                             "amount": abs(amount_raw),
                             "member": selected_member,
-                            "institution": institution_name
+                            "institution": institution_name,
+                            "balance": balance_val
                         })
 
         # --- 結果の表示と保存 ---
@@ -136,7 +161,7 @@ if uploaded_file:
             import_df = pd.DataFrame(processed_rows)
             
             st.write("### プレビュー (確認)")
-            st.caption("※この時点では重複チェックは行われていません。登録ボタンを押した時に判定されます。")
+            st.caption("※この時点では重複チェックは行われていません。")
             
             edited_df = st.data_editor(
                 import_df,
@@ -146,14 +171,14 @@ if uploaded_file:
                     "category_1": st.column_config.SelectboxColumn("収支区分", options=["支出", "収入"]),
                     "category_2": st.column_config.SelectboxColumn("費目(Cat2)", options=utils.CATEGORIES + ["その他"]),
                     "amount": st.column_config.NumberColumn("金額"),
-                    "institution": st.column_config.TextColumn("金融機関", disabled=True) # 編集不可で表示
+                    "institution": st.column_config.TextColumn("金融機関", disabled=True),
+                    "balance": st.column_config.NumberColumn("残高") # 追加表示
                 },
                 hide_index=True,
                 key="editor"
             )
             
             if st.button(f"✅ {target_sheet} に登録実行"):
-                # 第三引数に institution_name を渡すように変更
                 success, added_count, skipped_count = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
                 
                 if success:
