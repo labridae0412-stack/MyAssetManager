@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 import traceback
 
 # --- 定数定義 ---
-# カテゴリ2（費目）のリスト
 CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "その他"]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
@@ -86,7 +85,7 @@ def analyze_receipt(image_bytes, mode="total"):
     except Exception as e:
         return None, str(e)
 
-# 単票登録（Transaction_Log用：一旦既存のまま維持、または必要ならここも7列化が必要）
+# 単票登録（Transaction_Log用：6列のまま維持）
 def save_to_google_sheets(data):
     client = get_gspread_client()
     try:
@@ -97,8 +96,6 @@ def save_to_google_sheets(data):
             sheet = client.open_by_key(spreadsheet_id).sheet1
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-        # Transaction_Logは一旦旧形式(6列)のままにするか、ここも合わせるかは運用次第
-        # 今回はエラー回避のため6列で保存します
         row = [str(data['date']), data['store'], data['category'], data['amount'], now_jst, data['member']]
         sheet.append_row(row)
         return True
@@ -107,7 +104,7 @@ def save_to_google_sheets(data):
         return False
 
 # ------------------------------------------------------------------
-# 【修正】一括保存関数（カテゴリ1, カテゴリ2 の7列保存に対応）
+# 【修正】重複チェック機能付き 一括保存関数
 # ------------------------------------------------------------------
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
     client = get_gspread_client()
@@ -117,27 +114,74 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
             sheet = client.open_by_key(spreadsheet_id).worksheet(target_sheet_name)
         except gspread.WorksheetNotFound:
             st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
-            return False, "Sheet not found"
+            return False, "Sheet not found", 0
+
+        # 1. 既存データを取得して重複チェック用のセットを作成
+        existing_data = sheet.get_all_values()
+        existing_signatures = set()
+
+        # ヘッダー行(0行目)以降をループ
+        # スプレッドシート列順序: [0:日付, 1:店名, 2:収支(Cat1), 3:費目(Cat2), 4:金額, 5:入力日, 6:対象者]
+        if len(existing_data) > 1:
+            for row in existing_data[1:]:
+                # データが足りない行はスキップ
+                if len(row) < 7: continue
+                
+                # 重複判定キー: 日付 + 店名 + 収支 + 金額 + 対象者
+                # (費目Cat2は後で編集される可能性があるため重複判定から外す)
+                # 金額はカンマなどを除去して文字列化して比較
+                amount_clean = str(row[4]).replace(',', '').replace('円', '')
+                
+                signature = (
+                    str(row[0]), # Date
+                    str(row[1]), # Store
+                    str(row[2]), # Category1 (収支)
+                    amount_clean, # Amount
+                    str(row[6])  # Member
+                )
+                existing_signatures.add(signature)
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         
         rows_to_append = []
+        skipped_count = 0
+
+        # 2. 新規データをループしてチェック
         for _, row in df_to_save.iterrows():
-            # 列構成: [日付, 店名, カテゴリ1(収支), カテゴリ2(費目), 金額, 入力日, 対象者]
-            rows_to_append.append([
+            # 新規データのキー作成
+            new_signature = (
                 str(row['date']),
                 str(row['store']),
-                str(row['category_1']), # 収支区分 (支出/収入)
-                str(row['category_2']), # 費目詳細 (食費/未分類など)
-                int(row['amount']),
-                now_jst,
+                str(row['category_1']),
+                str(row['amount']), # DataFrame内はintだが文字に合わせて比較
                 str(row['member'])
-            ])
+            )
+
+            # 既存になければ追加リストへ
+            if new_signature not in existing_signatures:
+                rows_to_append.append([
+                    str(row['date']),
+                    str(row['store']),
+                    str(row['category_1']), # 収支
+                    str(row['category_2']), # 費目
+                    int(row['amount']),
+                    now_jst,
+                    str(row['member'])
+                ])
+                # 同じCSV内で重複がある場合も防ぐため、追加予定セットにも加える
+                existing_signatures.add(new_signature)
+            else:
+                skipped_count += 1
             
-        sheet.append_rows(rows_to_append)
-        return True, len(rows_to_append)
+        # 3. 追加データがあれば書き込み
+        if rows_to_append:
+            sheet.append_rows(rows_to_append)
+            return True, len(rows_to_append), skipped_count
+        else:
+            return True, 0, skipped_count
+
     except Exception as e:
-        return False, str(e)
+        return False, str(e), 0
 
 def load_data_from_sheets():
     client = get_gspread_client()
@@ -152,7 +196,6 @@ def load_data_from_sheets():
         if len(data) <= 1: return pd.DataFrame()
         df = pd.DataFrame(data[1:])
         
-        # 読み込み時は列数に応じて柔軟に対応
         if df.shape[1] >= 6:
             df = df.iloc[:, :6]
             df.columns = ["date", "store", "category", "amount", "timestamp", "member"]

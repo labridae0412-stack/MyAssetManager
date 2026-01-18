@@ -52,20 +52,18 @@ if uploaded_file:
         # A. 2列構成 (支出列 / 収入列) の場合: M銀行など
         # -----------------------------------------------------
         if "expense_col" in config and "income_col" in config:
-            # 必要な列のチェック
             required_cols = [config["date_col"], config["store_col"], config["expense_col"], config["income_col"]]
             missing_cols = [c for c in required_cols if c not in df.columns]
             
             if missing_cols:
                 st.error(f"エラー: CSV内に以下の列名が見つかりません。\n{missing_cols}")
             else:
-                # 行ごとに処理 (行内に支出と収入が同時にある場合も想定して個別に登録)
                 for index, row in df.iterrows():
                     date_val = pd.to_datetime(row[config["date_col"]], errors='coerce').date()
                     store_val = str(row[config["store_col"]]).strip() if pd.notna(row[config["store_col"]]) else ""
-                    if pd.isna(date_val): continue # 日付がない行はスキップ
+                    if pd.isna(date_val): continue
 
-                    # 1. 支出列のチェック
+                    # 1. 支出列チェック
                     exp_str = str(row[config["expense_col"]]).replace(',', '').replace('円', '')
                     try:
                         exp_amount = int(float(exp_str)) if exp_str and exp_str != 'nan' else 0
@@ -76,13 +74,13 @@ if uploaded_file:
                         processed_rows.append({
                             "date": date_val,
                             "store": store_val,
-                            "category_1": "支出",       # 自動判別: 支出
-                            "category_2": "未分類",     # デフォルト: 未分類
-                            "amount": abs(exp_amount),  # プラスの値として登録
+                            "category_1": "支出",
+                            "category_2": "未分類",
+                            "amount": abs(exp_amount),
                             "member": selected_member
                         })
 
-                    # 2. 収入列のチェック
+                    # 2. 収入列チェック
                     inc_str = str(row[config["income_col"]]).replace(',', '').replace('円', '')
                     try:
                         inc_amount = int(float(inc_str)) if inc_str and inc_str != 'nan' else 0
@@ -93,9 +91,9 @@ if uploaded_file:
                         processed_rows.append({
                             "date": date_val,
                             "store": store_val,
-                            "category_1": "収入",       # 自動判別: 収入
-                            "category_2": "その他",     # 収入は「その他」や「給与」にしておくと便利
-                            "amount": abs(inc_amount),  # プラスの値として登録
+                            "category_1": "収入",
+                            "category_2": "その他",
+                            "amount": abs(inc_amount),
                             "member": selected_member
                         })
 
@@ -120,14 +118,12 @@ if uploaded_file:
                     except:
                         amount_raw = 0
                     
-                    # 簡易ロジック: 金額がマイナスなら収入、プラスなら支出等のルールがあればここで分岐
-                    # ここでは一旦すべて「支出」として扱い、ユーザーに修正させる運用とします
                     if amount_raw != 0:
                         processed_rows.append({
                             "date": date_val,
                             "store": store_val,
-                            "category_1": "支出",   # デフォルト
-                            "category_2": "未分類", 
+                            "category_1": "支出",
+                            "category_2": "未分類",
                             "amount": abs(amount_raw),
                             "member": selected_member
                         })
@@ -137,6 +133,7 @@ if uploaded_file:
             import_df = pd.DataFrame(processed_rows)
             
             st.write("### プレビュー (確認)")
+            st.caption("※この時点では重複チェックは行われていません。登録ボタンを押した時に判定されます。")
             
             edited_df = st.data_editor(
                 import_df,
@@ -152,14 +149,23 @@ if uploaded_file:
             )
             
             if st.button(f"✅ {target_sheet} に登録実行"):
-                success, msg = utils.save_bulk_to_google_sheets(edited_df, target_sheet)
+                # 戻り値が3つに変更されました: 成功フラグ, 追加件数, スキップ件数
+                success, added_count, skipped_count = utils.save_bulk_to_google_sheets(edited_df, target_sheet)
+                
                 if success:
                     st.balloons()
-                    st.success(f"{msg} 件のデータを {target_sheet} に登録しました！")
+                    msg = f"登録完了！\n- **{added_count}** 件を新規登録しました。\n"
+                    if skipped_count > 0:
+                        msg += f"- **{skipped_count}** 件は重複のためスキップされました。"
+                    
+                    if added_count > 0:
+                        st.success(msg)
+                    else:
+                        st.warning(msg) # 全て重複の場合は警告色で見やすく
                 else:
-                    st.error(f"登録失敗: {msg}")
+                    st.error(f"登録失敗: {added_count}") # エラー時は第2引数にメッセージが入る
         else:
-            st.warning("読み込めるデータがありませんでした（金額がすべて0円、または日付不正など）。")
+            st.warning("読み込めるデータがありませんでした。")
 
     except Exception as e:
         st.error(f"読み込みエラー: {e}")
