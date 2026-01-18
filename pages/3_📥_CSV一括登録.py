@@ -25,7 +25,7 @@ if env != "local":
 # ==========================================
 st.title("📥 金融機関データ取込")
 st.markdown("各金融機関のCSVを取り込み、**収支区分(Cat1)** と **費目(Cat2)** に分けて登録します。")
-st.info("⚠️ スプレッドシートの列構成が `[日付, 店名, 収支, 費目, 金額...]` になっていることを確認してください。")
+st.info("⚠️ スプレッドシートの **H列** に「金融機関」列が追加されていることを確認してください。")
 
 # 1. 設定選択
 col1, col2 = st.columns(2)
@@ -77,7 +77,8 @@ if uploaded_file:
                             "category_1": "支出",
                             "category_2": "未分類",
                             "amount": abs(exp_amount),
-                            "member": selected_member
+                            "member": selected_member,
+                            "institution": institution_name # 表示確認用
                         })
 
                     # 2. 収入列チェック
@@ -94,7 +95,8 @@ if uploaded_file:
                             "category_1": "収入",
                             "category_2": "その他",
                             "amount": abs(inc_amount),
-                            "member": selected_member
+                            "member": selected_member,
+                            "institution": institution_name
                         })
 
         # -----------------------------------------------------
@@ -125,7 +127,8 @@ if uploaded_file:
                             "category_1": "支出",
                             "category_2": "未分類",
                             "amount": abs(amount_raw),
-                            "member": selected_member
+                            "member": selected_member,
+                            "institution": institution_name
                         })
 
         # --- 結果の表示と保存 ---
@@ -142,15 +145,16 @@ if uploaded_file:
                     "date": st.column_config.DateColumn("日付"),
                     "category_1": st.column_config.SelectboxColumn("収支区分", options=["支出", "収入"]),
                     "category_2": st.column_config.SelectboxColumn("費目(Cat2)", options=utils.CATEGORIES + ["その他"]),
-                    "amount": st.column_config.NumberColumn("金額")
+                    "amount": st.column_config.NumberColumn("金額"),
+                    "institution": st.column_config.TextColumn("金融機関", disabled=True) # 編集不可で表示
                 },
                 hide_index=True,
                 key="editor"
             )
             
             if st.button(f"✅ {target_sheet} に登録実行"):
-                # 戻り値が3つに変更されました: 成功フラグ, 追加件数, スキップ件数
-                success, added_count, skipped_count = utils.save_bulk_to_google_sheets(edited_df, target_sheet)
+                # 第三引数に institution_name を渡すように変更
+                success, added_count, skipped_count = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
                 
                 if success:
                     st.balloons()
@@ -161,9 +165,9 @@ if uploaded_file:
                     if added_count > 0:
                         st.success(msg)
                     else:
-                        st.warning(msg) # 全て重複の場合は警告色で見やすく
+                        st.warning(msg)
                 else:
-                    st.error(f"登録失敗: {added_count}") # エラー時は第2引数にメッセージが入る
+                    st.error(f"登録失敗: {added_count}")
         else:
             st.warning("読み込めるデータがありませんでした。")
 

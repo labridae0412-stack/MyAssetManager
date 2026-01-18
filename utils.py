@@ -85,7 +85,7 @@ def analyze_receipt(image_bytes, mode="total"):
     except Exception as e:
         return None, str(e)
 
-# 単票登録（Transaction_Log用：6列のまま維持）
+# 単票登録（Transaction_Log用：維持）
 def save_to_google_sheets(data):
     client = get_gspread_client()
     try:
@@ -104,9 +104,9 @@ def save_to_google_sheets(data):
         return False
 
 # ------------------------------------------------------------------
-# 【修正】重複チェック機能付き 一括保存関数
+# 【修正】一括保存関数 (金融機関名 columns対応)
 # ------------------------------------------------------------------
-def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
+def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:
         spreadsheet_id = st.secrets["SPREADSHEET_ID"]
@@ -116,28 +116,27 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
             st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
             return False, "Sheet not found", 0
 
-        # 1. 既存データを取得して重複チェック用のセットを作成
+        # 1. 重複チェック用データ取得
         existing_data = sheet.get_all_values()
         existing_signatures = set()
 
-        # ヘッダー行(0行目)以降をループ
-        # スプレッドシート列順序: [0:日付, 1:店名, 2:収支(Cat1), 3:費目(Cat2), 4:金額, 5:入力日, 6:対象者]
         if len(existing_data) > 1:
             for row in existing_data[1:]:
-                # データが足りない行はスキップ
-                if len(row) < 7: continue
+                if len(row) < 7: continue # 列不足行はスキップ
                 
-                # 重複判定キー: 日付 + 店名 + 収支 + 金額 + 対象者
-                # (費目Cat2は後で編集される可能性があるため重複判定から外す)
-                # 金額はカンマなどを除去して文字列化して比較
+                # 重複判定キー: [日付, 店名, 収支, 金額, 対象者, (あれば)金融機関]
                 amount_clean = str(row[4]).replace(',', '').replace('円', '')
                 
+                # 既存データに金融機関列(H列=index 7)があるか確認
+                inst_val = str(row[7]) if len(row) > 7 else ""
+
                 signature = (
                     str(row[0]), # Date
                     str(row[1]), # Store
-                    str(row[2]), # Category1 (収支)
+                    str(row[2]), # Cat1
                     amount_clean, # Amount
-                    str(row[6])  # Member
+                    str(row[6]), # Member
+                    inst_val     # Institution
                 )
                 existing_signatures.add(signature)
 
@@ -146,34 +145,35 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name):
         rows_to_append = []
         skipped_count = 0
 
-        # 2. 新規データをループしてチェック
+        # 2. 新規データ処理
         for _, row in df_to_save.iterrows():
-            # 新規データのキー作成
+            # 新規データのキー
             new_signature = (
                 str(row['date']),
                 str(row['store']),
                 str(row['category_1']),
-                str(row['amount']), # DataFrame内はintだが文字に合わせて比較
-                str(row['member'])
+                str(row['amount']),
+                str(row['member']),
+                str(institution_name) # 今回登録する金融機関名
             )
 
-            # 既存になければ追加リストへ
             if new_signature not in existing_signatures:
+                # [0:日付, 1:店名, 2:収支, 3:費目, 4:金額, 5:入力日, 6:対象者, 7:金融機関]
                 rows_to_append.append([
                     str(row['date']),
                     str(row['store']),
-                    str(row['category_1']), # 収支
-                    str(row['category_2']), # 費目
+                    str(row['category_1']),
+                    str(row['category_2']),
                     int(row['amount']),
                     now_jst,
-                    str(row['member'])
+                    str(row['member']),
+                    str(institution_name) # 追加: H列に保存
                 ])
-                # 同じCSV内で重複がある場合も防ぐため、追加予定セットにも加える
                 existing_signatures.add(new_signature)
             else:
                 skipped_count += 1
             
-        # 3. 追加データがあれば書き込み
+        # 3. 書き込み
         if rows_to_append:
             sheet.append_rows(rows_to_append)
             return True, len(rows_to_append), skipped_count
