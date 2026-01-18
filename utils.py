@@ -24,7 +24,7 @@ INSTITUTION_CONFIG = {
         "store_col": "お取り扱い内容", 
         "expense_col": "お引出し", 
         "income_col": "お預入れ",
-        "balance_col": "残高",     # 追加: 残高列の定義
+        "balance_col": "残高",
         "encoding": "shift_jis" 
     },
     "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
@@ -105,7 +105,7 @@ def save_to_google_sheets(data):
         return False
 
 # ------------------------------------------------------------------
-# 【修正】一括保存関数 (残高列対応)
+# 【修正】一括保存関数 (残高も重複判定キーに追加)
 # ------------------------------------------------------------------
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
@@ -128,14 +128,19 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                 amount_clean = str(row[4]).replace(',', '').replace('円', '')
                 inst_val = str(row[7]) if len(row) > 7 else ""
                 
-                # 重複判定キーには「残高」は含めない（同じ取引なら残高も同じはずのため）
+                # スプレッドシートのI列(index 8)から残高を取得
+                balance_val = str(row[8]) if len(row) > 8 else ""
+                balance_clean = balance_val.replace(',', '').replace('円', '')
+                
+                # 重複判定キー: [日付, 店名, 収支, 金額, 対象者, 金融機関, 残高]
                 signature = (
-                    str(row[0]), # Date
-                    str(row[1]), # Store
-                    str(row[2]), # Cat1
+                    str(row[0]),  # Date
+                    str(row[1]),  # Store
+                    str(row[2]),  # Cat1
                     amount_clean, # Amount
-                    str(row[6]), # Member
-                    inst_val     # Institution
+                    str(row[6]),  # Member
+                    inst_val,     # Institution
+                    balance_clean # Balance (判定に追加)
                 )
                 existing_signatures.add(signature)
 
@@ -146,19 +151,29 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
 
         # 2. 新規データ処理
         for _, row in df_to_save.iterrows():
+            # 残高データの整形（DataFrameから取得）
+            raw_bal = row.get('balance', '')
+            if pd.isna(raw_bal): raw_bal = ""
+            # 数値や浮動小数が混ざる場合を考慮して整形
+            bal_str = str(raw_bal).replace(',', '').replace('円', '')
+            if bal_str == 'nan' or bal_str == 'None': bal_str = ""
+            try:
+                if bal_str: bal_str = str(int(float(bal_str)))
+            except:
+                pass
+
+            # 新規データのキー
             new_signature = (
                 str(row['date']),
                 str(row['store']),
                 str(row['category_1']),
                 str(row['amount']),
                 str(row['member']),
-                str(institution_name)
+                str(institution_name),
+                bal_str # Balance (判定に追加)
             )
 
             if new_signature not in existing_signatures:
-                # 残高の取得（DataFrameに含まれていなければ空文字）
-                balance_val = str(row['balance']) if 'balance' in row and pd.notna(row['balance']) else ""
-
                 # [0:日付, 1:店名, 2:収支, 3:費目, 4:金額, 5:入力日, 6:対象者, 7:金融機関, 8:残高]
                 rows_to_append.append([
                     str(row['date']),
@@ -169,7 +184,7 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                     now_jst,
                     str(row['member']),
                     str(institution_name),
-                    balance_val # 追加: I列に保存
+                    bal_str # 整形済みの残高を保存
                 ])
                 existing_signatures.add(new_signature)
             else:
