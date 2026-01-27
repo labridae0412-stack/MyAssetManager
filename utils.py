@@ -9,14 +9,13 @@ from datetime import datetime, timedelta, timezone
 import traceback
 
 # --- 定数定義 ---
-# 画像で確認できた「立替」「利息」を追加し、マスタとの整合性をとります
 CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "立替", "利息", "その他"]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
 
 # シート名設定
 LOG_SHEET_NAME = "Transaction_Log"
-MASTER_SHEET_NAME = "Category_Master" # マスタ用シート名を追加
+MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 (CSV用) ---
 INSTITUTION_CONFIG = {
@@ -63,7 +62,7 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
-# --- カテゴリマスタ機能 (新設) ---
+# --- カテゴリマスタ機能 ---
 
 def load_category_master():
     """マスタから {キーワード: カテゴリ} の辞書を読み込む"""
@@ -86,7 +85,10 @@ def suggest_category(store_name, master_dict):
     return "未分類"
 
 def update_category_master(new_mappings):
-    """マスタに新しいキーワードとカテゴリを追加する (重複排除)"""
+    """
+    マスタに新しいキーワードとカテゴリを追加する (重複排除)。
+    既に存在するキーワードは上書きせず、スキップします。
+    """
     if not new_mappings: return 0
     client = get_gspread_client()
     sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
@@ -94,6 +96,7 @@ def update_category_master(new_mappings):
     
     rows_to_add = []
     for kw, cat in new_mappings.items():
+        # キーワードが存在しない場合のみ追加リストに入れる
         if kw and kw not in current_master:
             rows_to_add.append([kw, cat])
     
@@ -103,34 +106,39 @@ def update_category_master(new_mappings):
     return 0
 
 def create_master_from_history():
-    """過去のDBからマスタを自動生成する"""
+    """
+    Bank_DB の過去データから店名とカテゴリのペアを抽出し、
+    マスタに存在しないキーワードのみを追加登録する。
+    """
     client = get_gspread_client()
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
     
-    # DB系シートと、レシート登録シートの両方を走査
-    target_configs = [
-        {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3},
-        {"name": "Credit_DB", "store_idx": 1, "cat_idx": 3},
-        {"name": "Securities_DB", "store_idx": 1, "cat_idx": 3},
-        {"name": LOG_SHEET_NAME, "store_idx": 1, "cat_idx": 2} # Transaction_LogはC列がカテゴリ
-    ]
+    # 対象を Bank_DB のみに限定
+    # store_idx=1 (B列:店名), cat_idx=3 (D列:カテゴリ)
+    target_config = {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3}
 
-    for config in target_configs:
-        try:
-            sheet = spreadsheet.worksheet(config["name"])
-            data = sheet.get_all_values()
-            if len(data) <= 1: continue
-            
+    try:
+        sheet = spreadsheet.worksheet(target_config["name"])
+        data = sheet.get_all_values()
+        
+        if len(data) > 1:
             for row in data[1:]:
-                if len(row) > max(config["store_idx"], config["cat_idx"]):
-                    store = row[config["store_idx"]].strip()
-                    cat = row[config["cat_idx"]].strip()
+                if len(row) > max(target_config["store_idx"], target_config["cat_idx"]):
+                    store = row[target_config["store_idx"]].strip()
+                    cat = row[target_config["cat_idx"]].strip()
+                    
+                    # 店名があり、カテゴリが有効な場合のみ抽出
                     if store and cat and cat not in ["未分類", "その他", ""]:
                         history_mappings[store] = cat
-        except:
-            continue
+    except gspread.WorksheetNotFound:
+        st.error(f"{target_config['name']} シートが見つかりません。")
+        return 0
+    except Exception as e:
+        st.error(f"マスタ作成エラー: {e}")
+        return 0
             
+    # 抽出したペアをマスタ登録関数に渡す（重複チェックはあちらで行う）
     return update_category_master(history_mappings)
 
 # --- 既存の解析・保存ロジック (維持) ---
