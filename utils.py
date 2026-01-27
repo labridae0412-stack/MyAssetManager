@@ -7,9 +7,17 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 import traceback
+import unicodedata # 文字の正規化用に追加
 
 # --- 定数定義 ---
-CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "立替", "利息", "その他"]
+# ★修正点: スプレッドシートのマスタにあるカテゴリをここに追加しました
+CATEGORIES = [
+    "食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", 
+    "光熱費", "住居費", "通信費", "保険", "教育費", "投資", 
+    "立替", "利息", "給料", "手当", "賞与", "家賃", "保険代",
+    "楽天カード", "三井カード", "イオンカード", "投資振替", "はると振替", 
+    "その他"
+]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
 
@@ -76,12 +84,28 @@ def load_category_master():
     except:
         return {}
 
+def normalize_text(text):
+    """★修正点: 全角半角の統一とスペース除去を行うヘルパー関数"""
+    # NFKC正規化で全角英数を半角に、半角カナを全角にする等の統一を行う
+    normalized = unicodedata.normalize('NFKC', text)
+    # スペースをすべて削除して比較しやすくする
+    return normalized.replace(" ", "").replace("　", "")
+
 def suggest_category(store_name, master_dict):
-    """店名にキーワードが含まれていればカテゴリを返す"""
+    """
+    ★修正点: 文字表記ゆれに強くするため、正規化して比較する
+    店名にキーワードが含まれていればカテゴリを返す
+    """
     if not store_name: return "未分類"
+    
+    # 比較用に店名を正規化（スペース削除など）
+    target_store = normalize_text(store_name)
+    
     for keyword, category in master_dict.items():
-        if keyword in store_name:
+        # キーワード側も正規化して比較
+        if normalize_text(keyword) in target_store:
             return category
+            
     return "未分類"
 
 def update_category_master(new_mappings):
@@ -114,8 +138,6 @@ def create_master_from_history():
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
     
-    # 対象を Bank_DB のみに限定
-    # store_idx=1 (B列:店名), cat_idx=3 (D列:カテゴリ)
     target_config = {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3}
 
     try:
@@ -128,7 +150,6 @@ def create_master_from_history():
                     store = row[target_config["store_idx"]].strip()
                     cat = row[target_config["cat_idx"]].strip()
                     
-                    # 店名があり、カテゴリが有効な場合のみ抽出
                     if store and cat and cat not in ["未分類", "その他", ""]:
                         history_mappings[store] = cat
     except gspread.WorksheetNotFound:
@@ -138,7 +159,6 @@ def create_master_from_history():
         st.error(f"マスタ作成エラー: {e}")
         return 0
             
-    # 抽出したペアをマスタ登録関数に渡す（重複チェックはあちらで行う）
     return update_category_master(history_mappings)
 
 # --- 既存の解析・保存ロジック (維持) ---
