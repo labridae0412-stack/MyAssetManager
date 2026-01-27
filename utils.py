@@ -9,12 +9,14 @@ from datetime import datetime, timedelta, timezone
 import traceback
 
 # --- 定数定義 ---
-CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "その他"]
+# 画像で確認できた「立替」「利息」を追加し、マスタとの整合性をとります
+CATEGORIES = ["食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", "光熱費", "住居費", "通信費", "保険", "教育費", "投資", "立替", "利息", "その他"]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
 
 # シート名設定
 LOG_SHEET_NAME = "Transaction_Log"
+MASTER_SHEET_NAME = "Category_Master" # マスタ用シート名を追加
 
 # --- 金融機関ごとの設定 (CSV用) ---
 INSTITUTION_CONFIG = {
@@ -61,6 +63,78 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
+# --- カテゴリマスタ機能 (新設) ---
+
+def load_category_master():
+    """マスタから {キーワード: カテゴリ} の辞書を読み込む"""
+    client = get_gspread_client()
+    try:
+        sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
+        data = sheet.get_all_values()
+        if len(data) <= 1: return {}
+        # A列:キーワード, B列:カテゴリ
+        return {row[0]: row[1] for row in data[1:] if row[0]}
+    except:
+        return {}
+
+def suggest_category(store_name, master_dict):
+    """店名にキーワードが含まれていればカテゴリを返す"""
+    if not store_name: return "未分類"
+    for keyword, category in master_dict.items():
+        if keyword in store_name:
+            return category
+    return "未分類"
+
+def update_category_master(new_mappings):
+    """マスタに新しいキーワードとカテゴリを追加する (重複排除)"""
+    if not new_mappings: return 0
+    client = get_gspread_client()
+    sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
+    current_master = load_category_master()
+    
+    rows_to_add = []
+    for kw, cat in new_mappings.items():
+        if kw and kw not in current_master:
+            rows_to_add.append([kw, cat])
+    
+    if rows_to_add:
+        sheet.append_rows(rows_to_add)
+        return len(rows_to_add)
+    return 0
+
+def create_master_from_history():
+    """過去のDBからマスタを自動生成する"""
+    client = get_gspread_client()
+    spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
+    history_mappings = {}
+    
+    # DB系シートと、レシート登録シートの両方を走査
+    target_configs = [
+        {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3},
+        {"name": "Credit_DB", "store_idx": 1, "cat_idx": 3},
+        {"name": "Securities_DB", "store_idx": 1, "cat_idx": 3},
+        {"name": LOG_SHEET_NAME, "store_idx": 1, "cat_idx": 2} # Transaction_LogはC列がカテゴリ
+    ]
+
+    for config in target_configs:
+        try:
+            sheet = spreadsheet.worksheet(config["name"])
+            data = sheet.get_all_values()
+            if len(data) <= 1: continue
+            
+            for row in data[1:]:
+                if len(row) > max(config["store_idx"], config["cat_idx"]):
+                    store = row[config["store_idx"]].strip()
+                    cat = row[config["cat_idx"]].strip()
+                    if store and cat and cat not in ["未分類", "その他", ""]:
+                        history_mappings[store] = cat
+        except:
+            continue
+            
+    return update_category_master(history_mappings)
+
+# --- 既存の解析・保存ロジック (維持) ---
+
 def analyze_receipt(image_bytes, mode="total"):
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -86,7 +160,6 @@ def analyze_receipt(image_bytes, mode="total"):
     except Exception as e:
         return None, str(e)
 
-# 単票登録（Transaction_Log用：維持）
 def save_to_google_sheets(data):
     client = get_gspread_client()
     try:
@@ -104,9 +177,6 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         return False
 
-# ------------------------------------------------------------------
-# 【修正】一括保存関数 (残高も重複判定キーに追加)
-# ------------------------------------------------------------------
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:
@@ -117,7 +187,6 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
             st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
             return False, "Sheet not found", 0
 
-        # 1. 重複チェック用データ取得
         existing_data = sheet.get_all_values()
         existing_signatures = set()
 
@@ -127,70 +196,41 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                 
                 amount_clean = str(row[4]).replace(',', '').replace('円', '')
                 inst_val = str(row[7]) if len(row) > 7 else ""
-                
-                # スプレッドシートのI列(index 8)から残高を取得
                 balance_val = str(row[8]) if len(row) > 8 else ""
                 balance_clean = balance_val.replace(',', '').replace('円', '')
                 
-                # 重複判定キー: [日付, 店名, 収支, 金額, 対象者, 金融機関, 残高]
                 signature = (
-                    str(row[0]),  # Date
-                    str(row[1]),  # Store
-                    str(row[2]),  # Cat1
-                    amount_clean, # Amount
-                    str(row[6]),  # Member
-                    inst_val,     # Institution
-                    balance_clean # Balance (判定に追加)
+                    str(row[0]), str(row[1]), str(row[2]), 
+                    amount_clean, str(row[6]), inst_val, balance_clean
                 )
                 existing_signatures.add(signature)
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
-        
         rows_to_append = []
         skipped_count = 0
 
-        # 2. 新規データ処理
         for _, row in df_to_save.iterrows():
-            # 残高データの整形（DataFrameから取得）
             raw_bal = row.get('balance', '')
-            if pd.isna(raw_bal): raw_bal = ""
-            # 数値や浮動小数が混ざる場合を考慮して整形
-            bal_str = str(raw_bal).replace(',', '').replace('円', '')
-            if bal_str == 'nan' or bal_str == 'None': bal_str = ""
+            bal_str = str(raw_bal).replace(',', '').replace('円', '').replace('nan', '').replace('None', '')
             try:
                 if bal_str: bal_str = str(int(float(bal_str)))
-            except:
-                pass
+            except: pass
 
-            # 新規データのキー
             new_signature = (
-                str(row['date']),
-                str(row['store']),
-                str(row['category_1']),
-                str(row['amount']),
-                str(row['member']),
-                str(institution_name),
-                bal_str # Balance (判定に追加)
+                str(row['date']), str(row['store']), str(row['category_1']), 
+                str(row['amount']), str(row['member']), str(institution_name), bal_str
             )
 
             if new_signature not in existing_signatures:
-                # [0:日付, 1:店名, 2:収支, 3:費目, 4:金額, 5:入力日, 6:対象者, 7:金融機関, 8:残高]
                 rows_to_append.append([
-                    str(row['date']),
-                    str(row['store']),
-                    str(row['category_1']),
-                    str(row['category_2']),
-                    int(row['amount']),
-                    now_jst,
-                    str(row['member']),
-                    str(institution_name),
-                    bal_str # 整形済みの残高を保存
+                    str(row['date']), str(row['store']), str(row['category_1']), 
+                    str(row['category_2']), int(row['amount']), now_jst, 
+                    str(row['member']), str(institution_name), bal_str
                 ])
                 existing_signatures.add(new_signature)
             else:
                 skipped_count += 1
             
-        # 3. 書き込み
         if rows_to_append:
             sheet.append_rows(rows_to_append)
             return True, len(rows_to_append), skipped_count
