@@ -12,12 +12,12 @@ from datetime import datetime, timedelta, timezone
 import traceback
 
 # --- 定数定義 ---
-# ★修正点: 証券やカード明細にあるカテゴリも含めて網羅的に定義
+# ★修正点: カテゴリ名を「楽天カード」→「Rカード」などに変更
 CATEGORIES = [
     "食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", 
     "光熱費", "住居費", "通信費", "保険", "教育費", "投資", 
     "立替", "利息", "給料", "手当", "賞与", "家賃", "保険代",
-    "楽天カード", "三井カード", "イオンカード", "投資振替", "はると振替", 
+    "Rカード", "Mカード", "イオンカード", "投資振替", "はると振替", 
     "投資信託", "米国株式", "国内株式", "外国株式", "債券",
     "その他", "資産"
 ]
@@ -29,25 +29,24 @@ LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 ---
-# custom_loader: 特殊な読み込みが必要な場合に指定
+# ★修正点: キー名を「R銀行」「Rカード」「R証券」に変更
 INSTITUTION_CONFIG = {
     "M銀行": { 
         "sheet_name": "Bank_DB", "encoding": "shift_jis",
         "date_col": "年月日", "store_col": "お取り扱い内容", 
         "expense_col": "お引出し", "income_col": "お預入れ", "balance_col": "残高"
     },
-    "楽天カード": { 
-        "sheet_name": "Credit_DB", "encoding": "shift_jis", # e-NAVIは通常Shift_JIS
+    "Rカード": { 
+        "sheet_name": "Credit_DB", "encoding": "shift_jis",
         "date_col": "利用日", "store_col": "利用店名・商品名", 
         "amount_col": "支払総額", "member_col": "利用者"
     },
-    "楽天証券": {
+    "R証券": {
         "sheet_name": "Securities_DB", "encoding": "shift_jis",
-        "custom_loader": "rakuten_sec_balance" # 専用読み込み関数を指定
+        "custom_loader": "rakuten_sec_balance" 
     },
-    # 既存の設定（必要に応じて残す・修正する）
+    # 必要に応じて他の銀行も設定
     "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
-    "R銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "内容", "amount_col": "入出金", "encoding": "utf-8" },
     "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "shift_jis" }
 }
 
@@ -77,10 +76,11 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
-# --- 特殊CSV読み込み機能 (新規追加) ---
+# --- 特殊CSV読み込み機能 ---
 
 def extract_date_from_filename(filename):
     """ファイル名から日付(YYYYMMDD)を抽出する"""
+    if not filename: return None
     match = re.search(r'(\d{8})', filename)
     if match:
         try:
@@ -91,78 +91,60 @@ def extract_date_from_filename(filename):
 
 def load_rakuten_securities_csv(file_obj, encoding="shift_jis"):
     """
-    楽天証券の保有商品一覧CSV（ヘッダー付き）を読み込む
-    「■ 保有商品詳細 (すべて）」の次の行にあるヘッダーを探して読み込む
+    R証券の保有商品一覧CSVを読み込む
     """
     try:
-        # バイナリとして読み込み、デコードして行ごとに処理
+        # バイナリとして読み込み
         content = file_obj.getvalue().decode(encoding)
         lines = content.splitlines()
         
         start_row = 0
         found = False
+        # 「■ 保有商品詳細」の行を探す
         for i, line in enumerate(lines):
             if "■ 保有商品詳細" in line:
-                start_row = i + 2 # 「■...」の次が空行、その次がヘッダーの場合が多い
+                start_row = i + 2 # 見出しの2行下からヘッダー
                 found = True
                 break
         
         if not found:
-            # 見つからない場合は先頭から試す
             start_row = 0
 
-        # StringIOを使ってpandasで読み込む
+        # メモリ上のCSVとして読み込む
         csv_io = io.StringIO("\n".join(lines[start_row:]))
         df = pd.read_csv(csv_io)
         return df
     except Exception as e:
-        st.error(f"楽天証券CSV読み込みエラー: {e}")
+        # エラー時はNoneを返し、呼び出し元で処理させる
+        print(f"Read Error: {e}")
         return None
 
 # --- カテゴリマスタ機能 ---
 
 def load_category_master():
-    """マスタから {キーワード: カテゴリ} の辞書を読み込む"""
     client = get_gspread_client()
     try:
         sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
         data = sheet.get_all_values()
         if len(data) <= 1: return {}
-        # A列:キーワード, B列:カテゴリ
         return {row[0]: row[1] for row in data[1:] if row[0]}
     except:
         return {}
 
 def normalize_text(text):
-    """全角半角の統一とスペース除去を行うヘルパー関数"""
     if not isinstance(text, str): return str(text)
-    # NFKC正規化で全角英数を半角に、半角カナを全角にする等の統一を行う
     normalized = unicodedata.normalize('NFKC', text)
-    # スペースをすべて削除して比較しやすくする
     return normalized.replace(" ", "").replace("　", "")
 
 def suggest_category(store_name, master_dict):
-    """
-    文字表記ゆれに強くするため、正規化して比較する
-    店名にキーワードが含まれていればカテゴリを返す
-    """
     if not store_name: return "未分類"
-    
-    # 比較用に店名を正規化（スペース削除など）
     target_store = normalize_text(store_name)
-    
     for keyword, category in master_dict.items():
-        # キーワード側も正規化して比較
         if normalize_text(keyword) in target_store:
             return category
-            
     return "未分類"
 
 def update_category_master(new_mappings):
-    """
-    マスタに新しいキーワードとカテゴリを追加する (重複排除)。
-    既に存在するキーワードは上書きせず、スキップします。
-    """
     if not new_mappings: return 0
     client = get_gspread_client()
     sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
@@ -170,7 +152,6 @@ def update_category_master(new_mappings):
     
     rows_to_add = []
     for kw, cat in new_mappings.items():
-        # キーワードが存在しない場合のみ追加リストに入れる
         if kw and kw not in current_master:
             rows_to_add.append([kw, cat])
     
@@ -180,49 +161,38 @@ def update_category_master(new_mappings):
     return 0
 
 def create_master_from_history():
-    """
-    Bank_DB の過去データから店名とカテゴリのペアを抽出し、
-    マスタに存在しないキーワードのみを追加登録する。
-    """
+    """Bank_DBのみを対象にマスタを作成"""
     client = get_gspread_client()
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
-    
-    # 対象を Bank_DB のみに限定
     target_config = {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3}
 
     try:
         sheet = spreadsheet.worksheet(target_config["name"])
         data = sheet.get_all_values()
-        
         if len(data) > 1:
             for row in data[1:]:
                 if len(row) > max(target_config["store_idx"], target_config["cat_idx"]):
                     store = row[target_config["store_idx"]].strip()
                     cat = row[target_config["cat_idx"]].strip()
-                    
                     if store and cat and cat not in ["未分類", "その他", ""]:
                         history_mappings[store] = cat
-    except gspread.WorksheetNotFound:
-        st.error(f"{target_config['name']} シートが見つかりません。")
+    except:
         return 0
-    except Exception as e:
-        st.error(f"マスタ作成エラー: {e}")
-        return 0
-            
     return update_category_master(history_mappings)
 
-# --- 既存の解析・保存ロジック (維持) ---
+# --- 既存の解析・保存ロジック ---
 
 def analyze_receipt(image_bytes, mode="total"):
+    # (既存コードと同じため省略せず記述)
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     categories_str = "/".join(CATEGORIES)
     
     if mode == "split":
-        system_prompt = f"レシート画像を解析し、JSONで出力せよ。1. date(YYYY-MM-DD), store(店名). 2. itemsリスト(name, amount). カテゴリは推測。"
+        system_prompt = f"レシート解析。JSON出力。1. date, store. 2. items(name, amount). カテゴリ推測。"
     else:
-        system_prompt = f"レシート画像からdate(YYYY-MM-DD),store,amount(数値),category({categories_str})をJSONで抽出せよ。"
+        system_prompt = f"レシート解析。JSON出力。date, store, amount, category({categories_str})。"
 
     try:
         response = client.chat.completions.create(
@@ -344,7 +314,5 @@ def load_data_from_sheets():
 
 def get_fiscal_month(date_obj):
     if date_obj.day >= 25:
-        next_month = (date_obj.replace(day=1) + pd.DateOffset(months=1))
-        return next_month.strftime('%Y-%m')
-    else:
-        return date_obj.strftime('%Y-%m')
+        return (date_obj.replace(day=1) + pd.DateOffset(months=1)).strftime('%Y-%m')
+    return date_obj.strftime('%Y-%m')
