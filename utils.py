@@ -27,7 +27,7 @@ LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 ---
-# ★修正: 文字コードを 'cp932' (Windows Shift_JIS) に統一して文字化け防止
+# 文字コードは cp932 (Windows Shift-JIS) に統一
 INSTITUTION_CONFIG = {
     "M銀行": { 
         "sheet_name": "Bank_DB", "encoding": "cp932",
@@ -201,7 +201,7 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         return False
 
-# ★修正: 戻り値を統一 (True, 追加数, 重複行リスト)
+# ★修正: 戻り値を単純化 (True, 追加数, スキップ数)
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:
@@ -210,7 +210,7 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
             sheet = client.open_by_key(spreadsheet_id).worksheet(target_sheet_name)
         except gspread.WorksheetNotFound:
             st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
-            return False, "Sheet not found", []
+            return False, "Sheet not found", 0
 
         existing_data = sheet.get_all_values()
         existing_signatures = set()
@@ -230,7 +230,7 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         rows_to_append = []
-        skipped_rows = []
+        skipped_count = 0
 
         for _, row in df_to_save.iterrows():
             raw_bal = row.get('balance', '')
@@ -252,16 +252,16 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                 ])
                 existing_signatures.add(new_signature)
             else:
-                skipped_rows.append(row.to_dict())
+                skipped_count += 1
             
         if rows_to_append:
             sheet.append_rows(rows_to_append)
-            return True, len(rows_to_append), skipped_rows
+            return True, len(rows_to_append), skipped_count
         else:
-            return True, 0, skipped_rows
+            return True, 0, skipped_count
 
     except Exception as e:
-        return False, str(e), []
+        return False, str(e), 0
 
 def load_data_from_sheets():
     client = get_gspread_client()

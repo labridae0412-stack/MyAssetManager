@@ -6,9 +6,8 @@ from datetime import date
 st.set_page_config(page_title="CSV一括登録", layout="wide")
 utils.check_password()
 
-# セキュリティチェック
 if st.secrets.get("ENVIRONMENT", "cloud") != "local":
-    st.error("⛔ ローカル環境でのみ実行可能です")
+    st.error("⛔ セキュリティ制限: ローカル環境でのみ実行可能です")
     st.stop()
 
 st.title("📥 金融機関データ取込")
@@ -16,7 +15,6 @@ st.title("📥 金融機関データ取込")
 # --- マスタ管理 ---
 with st.sidebar:
     st.header("⚙️ マスタ管理")
-    st.info("過去のBank_DBデータから、店名とカテゴリを学習します。")
     if st.button("🔄 過去データからマスタを初期作成"):
         with st.spinner("解析中..."):
             count = utils.create_master_from_history()
@@ -24,7 +22,7 @@ with st.sidebar:
 
 st.markdown("各金融機関のCSVを取り込み、**収支区分(Cat1)** と **費目(Cat2)** に分けて登録します。")
 
-# 1. 設定選択
+# 設定選択
 col1, col2 = st.columns(2)
 institution_name = col1.selectbox("🏦 金融機関を選択", list(utils.INSTITUTION_CONFIG.keys()))
 selected_member_default = col2.selectbox("👤 デフォルトの対象者", utils.MEMBERS, index=0)
@@ -35,7 +33,7 @@ master_dict = utils.load_category_master()
 
 st.caption(f"保存先: **{target_sheet}** / 設定: {config['encoding']}")
 
-# 2. ファイルアップロード
+# ファイルアップロード
 uploaded_files = st.file_uploader(
     f"{institution_name} のCSV (複数選択可)", 
     type=["csv"], 
@@ -50,31 +48,27 @@ if uploaded_files:
             df = pd.DataFrame()
             target_date = None
             
-            # --- A. 特殊ローダー (R証券) ---
+            # --- A. 特殊ローダー ---
             if "custom_loader" in config:
                 if config["custom_loader"] == "rakuten_sec_balance":
                     df = utils.load_rakuten_securities_csv(uploaded_file, config["encoding"])
-                    
                     if df is not None:
                         file_date = utils.extract_date_from_filename(uploaded_file.name)
                         if file_date:
                             target_date = file_date
                         else:
-                            st.warning(f"⚠️ {uploaded_file.name}: 日付不明のため本日の日付を使用します。")
+                            st.warning(f"⚠️ {uploaded_file.name}: 日付不明のため本日の日付を使用")
                             target_date = date.today()
                         df["entry_date"] = target_date
-                    else:
-                        st.error(f"❌ {uploaded_file.name}: 読み込み失敗")
 
             # --- B. 通常ローダー ---
             else:
-                # 文字コードは config['encoding'] (cp932) を使用
                 df = pd.read_csv(uploaded_file, encoding=config["encoding"])
             
             if df is None or df.empty: continue
             
             # --- データ整形 ---
-            # 1. R証券 (残高)
+            # 1. R証券
             if "custom_loader" in config and config["custom_loader"] == "rakuten_sec_balance":
                 type_col = "種別"
                 name_col = "銘柄"
@@ -97,10 +91,10 @@ if uploaded_files:
                                 "amount": amount_val,
                                 "member": selected_member_default,
                                 "institution": institution_name,
-                                "balance": None 
+                                "balance": None # 残高列は空
                             })
 
-            # 2. Rカード (利用者列あり)
+            # 2. Rカード (利用者列対応)
             elif "member_col" in config:
                 for _, row in df.iterrows():
                     date_val = pd.to_datetime(row[config["date_col"]], errors='coerce').date()
@@ -172,15 +166,13 @@ if uploaded_files:
                         })
 
         except Exception as e:
-            st.error(f"❌ {uploaded_file.name}: 処理中にエラーが発生しました - {e}")
+            st.error(f"❌ {uploaded_file.name}: 処理エラー - {e}")
 
     # --- 結果表示と保存 ---
     if all_processed_rows:
         import_df = pd.DataFrame(all_processed_rows).sort_values(by="date")
         
         st.write(f"### プレビュー (全 {len(uploaded_files)} ファイル分)")
-        if "custom_loader" not in config:
-            st.info("💡 店名からカテゴリを推論しました。「未分類」の箇所は手動で修正してください。")
         
         edited_df = st.data_editor(
             import_df,
@@ -197,55 +189,33 @@ if uploaded_files:
         )
         
         if st.button(f"✅ {target_sheet} に一括登録実行"):
-            # ★修正: 戻り値が (bool, int) でも (bool, int, list) でもエラーにならないようにする
-            try:
-                ret = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
+            # ★修正: シンプルな戻り値受け取り
+            success, added_count, skipped_count = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
+            
+            if success:
+                st.balloons()
+                msg = f"✅ 登録完了！\n- **{added_count}** 件を新規登録\n"
+                if skipped_count > 0:
+                    msg += f"- **{skipped_count}** 件は重複のためスキップされました"
+                st.success(msg)
+
+                # マスタ学習
+                new_mappings = {}
+                for _, r in edited_df.iterrows():
+                    if r['category_1'] in ["支出", "収入"] and \
+                       r['store'] and r['store'] not in master_dict and \
+                       r['category_2'] not in ["未分類", "その他"]:
+                        new_mappings[r['store']] = r['category_2']
                 
-                # 戻り値の数チェック
-                if len(ret) == 3:
-                    success, added, skipped_info = ret
-                else:
-                    success, added = ret
-                    skipped_info = 0 # デフォルト
-                
-                # 重複情報の型チェック (intなら件数のみ、listなら詳細あり)
-                if isinstance(skipped_info, list):
-                    skipped_rows = skipped_info
-                    skipped_count = len(skipped_rows)
-                else:
-                    skipped_rows = []
-                    skipped_count = int(skipped_info)
-
-                if success:
-                    st.balloons()
-                    msg = f"✅ 登録処理が完了しました\n- **新規登録**: {added} 件\n"
-                    if skipped_count > 0:
-                        msg += f"- **重複スキップ**: {skipped_count} 件"
-                    st.success(msg)
-
-                    if skipped_rows:
-                        with st.expander("⚠️ 重複によりスキップされたデータを確認する", expanded=True):
-                            st.dataframe(pd.DataFrame(skipped_rows))
-                            st.caption("※これらのデータは既存データと完全に一致したため登録されませんでした。")
-
-                    new_mappings = {}
-                    for _, r in edited_df.iterrows():
-                        if r['category_1'] in ["支出", "収入"] and \
-                           r['store'] and r['store'] not in master_dict and \
-                           r['category_2'] not in ["未分類", "その他"]:
-                            new_mappings[r['store']] = r['category_2']
-                    
-                    if new_mappings:
-                        st.divider()
-                        st.write("📚 新しい店名をマスタに登録しますか？")
-                        st.json(new_mappings, expanded=False)
-                        if st.button("マスタに保存"):
-                            utils.update_category_master(new_mappings)
-                            st.toast("マスタを更新しました")
-                            master_dict.update(new_mappings)
-                else:
-                    st.error(f"登録エラー: {added}")
-            except Exception as e:
-                st.error(f"保存処理エラー: {e}")
+                if new_mappings:
+                    st.divider()
+                    st.write("📚 新しい店名をマスタに登録しますか？")
+                    st.json(new_mappings, expanded=False)
+                    if st.button("マスタに保存"):
+                        utils.update_category_master(new_mappings)
+                        st.toast("マスタを更新しました")
+                        master_dict.update(new_mappings)
+            else:
+                st.error(f"登録エラー: {added_count}")
     else:
         st.warning("有効なデータが見つかりませんでした。")
