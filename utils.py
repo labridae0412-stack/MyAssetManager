@@ -27,7 +27,7 @@ LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 ---
-# ★修正: 文字コードを 'cp932' (Windows Shift_JIS) に統一
+# ★修正: 文字コードを 'cp932' (Windows Shift_JIS) に統一して文字化け防止
 INSTITUTION_CONFIG = {
     "M銀行": { 
         "sheet_name": "Bank_DB", "encoding": "cp932",
@@ -201,7 +201,7 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         return False
 
-# ★修正: 戻り値を(True, 追加数, 重複行リスト)に統一
+# ★修正: 戻り値を統一 (True, 追加数, 重複行リスト)
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:

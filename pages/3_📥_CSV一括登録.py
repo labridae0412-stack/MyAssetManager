@@ -103,25 +103,17 @@ if uploaded_files:
             # 2. Rカード (利用者列あり)
             elif "member_col" in config:
                 for _, row in df.iterrows():
-                    # 日付
                     date_val = pd.to_datetime(row[config["date_col"]], errors='coerce').date()
                     if pd.isna(date_val): continue
                     
-                    # 店名
                     store_val = str(row[config["store_col"]]).strip()
                     
-                    # 金額
                     amt_str = str(row[config["amount_col"]]).replace(',', '').replace('円', '')
-                    try:
-                        amount_val = int(float(amt_str))
-                    except:
-                        continue # 金額が読み取れない行はスキップ
+                    try: amount_val = int(float(amt_str))
+                    except: continue
                     
-                    # 利用者 (CSVの値を優先)
                     csv_member = str(row[config["member_col"]]).strip()
                     member_val = csv_member if csv_member else selected_member_default
-                    
-                    # カテゴリ推論
                     suggested_cat = utils.suggest_category(store_val, master_dict)
 
                     all_processed_rows.append({
@@ -205,30 +197,37 @@ if uploaded_files:
         )
         
         if st.button(f"✅ {target_sheet} に一括登録実行"):
-            # 戻り値: success(bool), added(int), skipped_rows(list)
+            # ★修正: 戻り値が (bool, int) でも (bool, int, list) でもエラーにならないようにする
             try:
                 ret = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
-                # 戻り値が2つか3つかで分岐（安全策）
-                if len(ret) == 3:
-                    success, added, skipped_rows = ret
-                else:
-                    success, added, _ = ret
-                    skipped_rows = []
                 
+                # 戻り値の数チェック
+                if len(ret) == 3:
+                    success, added, skipped_info = ret
+                else:
+                    success, added = ret
+                    skipped_info = 0 # デフォルト
+                
+                # 重複情報の型チェック (intなら件数のみ、listなら詳細あり)
+                if isinstance(skipped_info, list):
+                    skipped_rows = skipped_info
+                    skipped_count = len(skipped_rows)
+                else:
+                    skipped_rows = []
+                    skipped_count = int(skipped_info)
+
                 if success:
                     st.balloons()
                     msg = f"✅ 登録処理が完了しました\n- **新規登録**: {added} 件\n"
-                    skipped_count = len(skipped_rows)
                     if skipped_count > 0:
                         msg += f"- **重複スキップ**: {skipped_count} 件"
                     st.success(msg)
 
-                    if skipped_count > 0:
+                    if skipped_rows:
                         with st.expander("⚠️ 重複によりスキップされたデータを確認する", expanded=True):
                             st.dataframe(pd.DataFrame(skipped_rows))
                             st.caption("※これらのデータは既存データと完全に一致したため登録されませんでした。")
 
-                    # マスタ学習
                     new_mappings = {}
                     for _, r in edited_df.iterrows():
                         if r['category_1'] in ["支出", "収入"] and \
