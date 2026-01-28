@@ -2,21 +2,24 @@ import streamlit as st
 import pandas as pd
 import json
 import base64
+import re
+import io
+import unicodedata
 from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
 import traceback
-import unicodedata # 文字の正規化用に追加
 
 # --- 定数定義 ---
-# ★修正点: スプレッドシートのマスタにあるカテゴリをここに追加しました
+# ★修正点: 証券やカード明細にあるカテゴリも含めて網羅的に定義
 CATEGORIES = [
     "食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", 
     "光熱費", "住居費", "通信費", "保険", "教育費", "投資", 
     "立替", "利息", "給料", "手当", "賞与", "家賃", "保険代",
     "楽天カード", "三井カード", "イオンカード", "投資振替", "はると振替", 
-    "その他"
+    "投資信託", "米国株式", "国内株式", "外国株式", "債券",
+    "その他", "資産"
 ]
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
@@ -25,22 +28,26 @@ JST = timezone(timedelta(hours=9), 'JST')
 LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
-# --- 金融機関ごとの設定 (CSV用) ---
+# --- 金融機関ごとの設定 ---
+# custom_loader: 特殊な読み込みが必要な場合に指定
 INSTITUTION_CONFIG = {
     "M銀行": { 
-        "sheet_name": "Bank_DB", 
-        "date_col": "年月日", 
-        "store_col": "お取り扱い内容", 
-        "expense_col": "お引出し", 
-        "income_col": "お預入れ",
-        "balance_col": "残高",
-        "encoding": "shift_jis" 
+        "sheet_name": "Bank_DB", "encoding": "shift_jis",
+        "date_col": "年月日", "store_col": "お取り扱い内容", 
+        "expense_col": "お引出し", "income_col": "お預入れ", "balance_col": "残高"
     },
+    "楽天カード": { 
+        "sheet_name": "Credit_DB", "encoding": "shift_jis", # e-NAVIは通常Shift_JIS
+        "date_col": "利用日", "store_col": "利用店名・商品名", 
+        "amount_col": "支払総額", "member_col": "利用者"
+    },
+    "楽天証券": {
+        "sheet_name": "Securities_DB", "encoding": "shift_jis",
+        "custom_loader": "rakuten_sec_balance" # 専用読み込み関数を指定
+    },
+    # 既存の設定（必要に応じて残す・修正する）
     "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
     "R銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "内容", "amount_col": "入出金", "encoding": "utf-8" },
-    "R証券": { "sheet_name": "Securities_DB", "date_col": "受渡日", "store_col": "銘柄名", "amount_col": "受渡金額", "encoding": "shift_jis" },
-    "Rクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "利用店名・商品名", "amount_col": "支払総額", "encoding": "utf-8" },
-    "Mクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "利用店名", "amount_col": "金額", "encoding": "shift_jis" },
     "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "shift_jis" }
 }
 
@@ -70,6 +77,48 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
+# --- 特殊CSV読み込み機能 (新規追加) ---
+
+def extract_date_from_filename(filename):
+    """ファイル名から日付(YYYYMMDD)を抽出する"""
+    match = re.search(r'(\d{8})', filename)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), '%Y%m%d').date()
+        except:
+            return None
+    return None
+
+def load_rakuten_securities_csv(file_obj, encoding="shift_jis"):
+    """
+    楽天証券の保有商品一覧CSV（ヘッダー付き）を読み込む
+    「■ 保有商品詳細 (すべて）」の次の行にあるヘッダーを探して読み込む
+    """
+    try:
+        # バイナリとして読み込み、デコードして行ごとに処理
+        content = file_obj.getvalue().decode(encoding)
+        lines = content.splitlines()
+        
+        start_row = 0
+        found = False
+        for i, line in enumerate(lines):
+            if "■ 保有商品詳細" in line:
+                start_row = i + 2 # 「■...」の次が空行、その次がヘッダーの場合が多い
+                found = True
+                break
+        
+        if not found:
+            # 見つからない場合は先頭から試す
+            start_row = 0
+
+        # StringIOを使ってpandasで読み込む
+        csv_io = io.StringIO("\n".join(lines[start_row:]))
+        df = pd.read_csv(csv_io)
+        return df
+    except Exception as e:
+        st.error(f"楽天証券CSV読み込みエラー: {e}")
+        return None
+
 # --- カテゴリマスタ機能 ---
 
 def load_category_master():
@@ -85,7 +134,8 @@ def load_category_master():
         return {}
 
 def normalize_text(text):
-    """★修正点: 全角半角の統一とスペース除去を行うヘルパー関数"""
+    """全角半角の統一とスペース除去を行うヘルパー関数"""
+    if not isinstance(text, str): return str(text)
     # NFKC正規化で全角英数を半角に、半角カナを全角にする等の統一を行う
     normalized = unicodedata.normalize('NFKC', text)
     # スペースをすべて削除して比較しやすくする
@@ -93,7 +143,7 @@ def normalize_text(text):
 
 def suggest_category(store_name, master_dict):
     """
-    ★修正点: 文字表記ゆれに強くするため、正規化して比較する
+    文字表記ゆれに強くするため、正規化して比較する
     店名にキーワードが含まれていればカテゴリを返す
     """
     if not store_name: return "未分類"
@@ -138,6 +188,7 @@ def create_master_from_history():
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
     
+    # 対象を Bank_DB のみに限定
     target_config = {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3}
 
     try:
