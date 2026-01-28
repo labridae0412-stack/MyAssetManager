@@ -23,29 +23,28 @@ CATEGORIES = [
 MEMBERS = ["マサ", "ユウ", "ハル", "共通"]
 JST = timezone(timedelta(hours=9), 'JST')
 
-# シート名設定
 LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 ---
+# ★修正: 文字コードを 'cp932' (Windows Shift_JIS) に統一
 INSTITUTION_CONFIG = {
     "M銀行": { 
-        "sheet_name": "Bank_DB", "encoding": "shift_jis",
+        "sheet_name": "Bank_DB", "encoding": "cp932",
         "date_col": "年月日", "store_col": "お取り扱い内容", 
         "expense_col": "お引出し", "income_col": "お預入れ", "balance_col": "残高"
     },
     "Rカード": { 
-        "sheet_name": "Credit_DB", "encoding": "shift_jis",
+        "sheet_name": "Credit_DB", "encoding": "cp932",
         "date_col": "利用日", "store_col": "利用店名・商品名", 
         "amount_col": "支払総額", "member_col": "利用者"
     },
     "R証券": {
-        "sheet_name": "Securities_DB", "encoding": "shift_jis",
+        "sheet_name": "Securities_DB", "encoding": "cp932",
         "custom_loader": "rakuten_sec_balance" 
     },
-    # 他の銀行設定
-    "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
-    "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "shift_jis" }
+    "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "cp932" },
+    "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "cp932" }
 }
 
 def check_password():
@@ -56,8 +55,6 @@ def check_password():
         st.session_state['authenticated'] = False
     if st.session_state['authenticated']:
         return True
-
-    st.markdown("""<style>div[data-testid="stTextInput"] input { font-size: 20px; padding: 15px; } div[data-testid="stButton"] button { height: 3em; font-size: 18px; }</style>""", unsafe_allow_html=True)
     st.title("🔐 ログイン")
     password = st.text_input("Password", type="password", key="login_pass")
     if st.button("ログイン"):
@@ -86,11 +83,10 @@ def extract_date_from_filename(filename):
             return None
     return None
 
-def load_rakuten_securities_csv(file_obj, encoding="shift_jis"):
+def load_rakuten_securities_csv(file_obj, encoding="cp932"):
     try:
         content = file_obj.getvalue().decode(encoding)
         lines = content.splitlines()
-        
         start_row = 0
         found = False
         for i, line in enumerate(lines):
@@ -98,9 +94,7 @@ def load_rakuten_securities_csv(file_obj, encoding="shift_jis"):
                 start_row = i + 2
                 found = True
                 break
-        
         if not found: start_row = 0
-
         csv_io = io.StringIO("\n".join(lines[start_row:]))
         df = pd.read_csv(csv_io)
         return df
@@ -138,12 +132,10 @@ def update_category_master(new_mappings):
     client = get_gspread_client()
     sheet = client.open_by_key(st.secrets["SPREADSHEET_ID"]).worksheet(MASTER_SHEET_NAME)
     current_master = load_category_master()
-    
     rows_to_add = []
     for kw, cat in new_mappings.items():
         if kw and kw not in current_master:
             rows_to_add.append([kw, cat])
-    
     if rows_to_add:
         sheet.append_rows(rows_to_add)
         return len(rows_to_add)
@@ -154,7 +146,6 @@ def create_master_from_history():
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
     target_config = {"name": "Bank_DB", "store_idx": 1, "cat_idx": 3}
-
     try:
         sheet = spreadsheet.worksheet(target_config["name"])
         data = sheet.get_all_values()
@@ -175,12 +166,10 @@ def analyze_receipt(image_bytes, mode="total"):
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     categories_str = "/".join(CATEGORIES)
-    
     if mode == "split":
         system_prompt = f"レシート解析。JSON出力。1. date, store. 2. items(name, amount). カテゴリ推測。"
     else:
         system_prompt = f"レシート解析。JSON出力。date, store, amount, category({categories_str})。"
-
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -204,7 +193,6 @@ def save_to_google_sheets(data):
             sheet = client.open_by_key(spreadsheet_id).worksheet(LOG_SHEET_NAME)
         except:
             sheet = client.open_by_key(spreadsheet_id).sheet1
-
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         row = [str(data['date']), data['store'], data['category'], data['amount'], now_jst, data['member']]
         sheet.append_row(row)
@@ -213,7 +201,7 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         return False
 
-# ★修正点: 戻り値を変更 (skipped_count -> skipped_rows)
+# ★修正: 戻り値を(True, 追加数, 重複行リスト)に統一
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:
@@ -227,16 +215,13 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
         existing_data = sheet.get_all_values()
         existing_signatures = set()
 
-        # 既存データのシグネチャ作成（重複判定用）
         if len(existing_data) > 1:
             for row in existing_data[1:]:
                 if len(row) < 7: continue 
-                
                 amount_clean = str(row[4]).replace(',', '').replace('円', '')
                 inst_val = str(row[7]) if len(row) > 7 else ""
                 balance_val = str(row[8]) if len(row) > 8 else ""
                 balance_clean = balance_val.replace(',', '').replace('円', '')
-                
                 signature = (
                     str(row[0]), str(row[1]), str(row[2]), 
                     amount_clean, str(row[6]), inst_val, balance_clean
@@ -245,7 +230,7 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         rows_to_append = []
-        skipped_rows = [] # 重複データを格納するリスト
+        skipped_rows = []
 
         for _, row in df_to_save.iterrows():
             raw_bal = row.get('balance', '')
@@ -267,7 +252,6 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                 ])
                 existing_signatures.add(new_signature)
             else:
-                # 重複した行データを保存
                 skipped_rows.append(row.to_dict())
             
         if rows_to_append:
@@ -287,11 +271,9 @@ def load_data_from_sheets():
             sheet = client.open_by_key(spreadsheet_id).worksheet(LOG_SHEET_NAME)
         except:
             sheet = client.open_by_key(spreadsheet_id).sheet1
-            
         data = sheet.get_all_values()
         if len(data) <= 1: return pd.DataFrame()
         df = pd.DataFrame(data[1:])
-        
         if df.shape[1] >= 6:
             df = df.iloc[:, :6]
             df.columns = ["date", "store", "category", "amount", "timestamp", "member"]

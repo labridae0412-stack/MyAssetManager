@@ -35,7 +35,7 @@ master_dict = utils.load_category_master()
 
 st.caption(f"保存先: **{target_sheet}** / 設定: {config['encoding']}")
 
-# 2. ファイルアップロード (★修正: 複数ファイル許可)
+# 2. ファイルアップロード
 uploaded_files = st.file_uploader(
     f"{institution_name} のCSV (複数選択可)", 
     type=["csv"], 
@@ -43,40 +43,35 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # データを蓄積するリスト
     all_processed_rows = []
     
-    # ★修正: 複数ファイルをループ処理
     for uploaded_file in uploaded_files:
         try:
             df = pd.DataFrame()
             target_date = None
             
-            # --- A. 特殊ローダー (R証券など) ---
+            # --- A. 特殊ローダー (R証券) ---
             if "custom_loader" in config:
                 if config["custom_loader"] == "rakuten_sec_balance":
                     df = utils.load_rakuten_securities_csv(uploaded_file, config["encoding"])
                     
                     if df is not None:
-                        # ファイル名から日付抽出
                         file_date = utils.extract_date_from_filename(uploaded_file.name)
                         if file_date:
                             target_date = file_date
                         else:
-                            st.warning(f"⚠️ {uploaded_file.name}: 日付を取得できませんでした。本日の日付を使用します。")
-                            target_date = date.today() # 個別確認が難しいため一旦当日を入れる
-                        
+                            st.warning(f"⚠️ {uploaded_file.name}: 日付不明のため本日の日付を使用します。")
+                            target_date = date.today()
                         df["entry_date"] = target_date
                     else:
-                        st.error(f"❌ {uploaded_file.name}: 読み込みに失敗しました。")
+                        st.error(f"❌ {uploaded_file.name}: 読み込み失敗")
 
             # --- B. 通常ローダー ---
             else:
+                # 文字コードは config['encoding'] (cp932) を使用
                 df = pd.read_csv(uploaded_file, encoding=config["encoding"])
             
-            # 読み込み結果チェック
-            if df is None or df.empty:
-                continue # 次のファイルへ
+            if df is None or df.empty: continue
             
             # --- データ整形 ---
             # 1. R証券 (残高)
@@ -84,18 +79,14 @@ if uploaded_files:
                 type_col = "種別"
                 name_col = "銘柄"
                 val_col = "時価評価額[円]"
-
-                # 銘柄列名のゆらぎ対応
                 if name_col not in df.columns and "銘柄コード・ティッカー" in df.columns:
                     name_col = "銘柄コード・ティッカー"
-
+                
                 if val_col in df.columns:
                     for _, row in df.iterrows():
                         val_str = str(row.get(val_col, "0")).replace(',', '').replace('円', '')
-                        try:
-                            amount_val = int(float(val_str))
-                        except:
-                            amount_val = 0
+                        try: amount_val = int(float(val_str))
+                        except: amount_val = 0
                         
                         if amount_val > 0:
                             all_processed_rows.append({
@@ -106,15 +97,17 @@ if uploaded_files:
                                 "amount": amount_val,
                                 "member": selected_member_default,
                                 "institution": institution_name,
-                                "balance": None # ★修正: 残高列(I列)は不要なのでNoneを設定
+                                "balance": None 
                             })
 
             # 2. Rカード (利用者列あり)
             elif "member_col" in config:
                 for _, row in df.iterrows():
+                    # 日付
                     date_val = pd.to_datetime(row[config["date_col"]], errors='coerce').date()
                     if pd.isna(date_val): continue
                     
+                    # 店名
                     store_val = str(row[config["store_col"]]).strip()
                     
                     # 金額
@@ -122,9 +115,9 @@ if uploaded_files:
                     try:
                         amount_val = int(float(amt_str))
                     except:
-                        continue
+                        continue # 金額が読み取れない行はスキップ
                     
-                    # 利用者
+                    # 利用者 (CSVの値を優先)
                     csv_member = str(row[config["member_col"]]).strip()
                     member_val = csv_member if csv_member else selected_member_default
                     
@@ -139,7 +132,7 @@ if uploaded_files:
                         "amount": amount_val,
                         "member": member_val,
                         "institution": institution_name,
-                        "balance": "" # クレカは残高なし
+                        "balance": "" 
                     })
 
             # 3. その他銀行
@@ -158,7 +151,6 @@ if uploaded_files:
                     
                     amt = 0
                     cat1 = "支出"
-
                     if is_2col:
                         e_str = str(row[config["expense_col"]]).replace(',', '')
                         i_str = str(row[config["income_col"]]).replace(',', '')
@@ -188,13 +180,11 @@ if uploaded_files:
                         })
 
         except Exception as e:
-            st.error(f"❌ {uploaded_file.name}: 処理エラー - {e}")
+            st.error(f"❌ {uploaded_file.name}: 処理中にエラーが発生しました - {e}")
 
-    # --- 結果表示と保存 (全ファイル分まとめて) ---
+    # --- 結果表示と保存 ---
     if all_processed_rows:
-        import_df = pd.DataFrame(all_processed_rows)
-        # 日付順にソートして見やすくする
-        import_df = import_df.sort_values(by="date")
+        import_df = pd.DataFrame(all_processed_rows).sort_values(by="date")
         
         st.write(f"### プレビュー (全 {len(uploaded_files)} ファイル分)")
         if "custom_loader" not in config:
@@ -215,28 +205,48 @@ if uploaded_files:
         )
         
         if st.button(f"✅ {target_sheet} に一括登録実行"):
-            success, added, skipped = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
-            if success:
-                st.balloons()
-                st.success(f"登録完了: {added} 件 / スキップ(重複): {skipped} 件")
+            # 戻り値: success(bool), added(int), skipped_rows(list)
+            try:
+                ret = utils.save_bulk_to_google_sheets(edited_df, target_sheet, institution_name)
+                # 戻り値が2つか3つかで分岐（安全策）
+                if len(ret) == 3:
+                    success, added, skipped_rows = ret
+                else:
+                    success, added, _ = ret
+                    skipped_rows = []
                 
-                # マスタ学習 (支出・収入のみ)
-                new_mappings = {}
-                for _, r in edited_df.iterrows():
-                    if r['category_1'] in ["支出", "収入"] and \
-                       r['store'] and r['store'] not in master_dict and \
-                       r['category_2'] not in ["未分類", "その他"]:
-                        new_mappings[r['store']] = r['category_2']
-                
-                if new_mappings:
-                    st.divider()
-                    st.write("📚 新しい店名をマスタに登録しますか？")
-                    st.json(new_mappings, expanded=False)
-                    if st.button("マスタに保存"):
-                        utils.update_category_master(new_mappings)
-                        st.toast("マスタを更新しました")
-                        master_dict.update(new_mappings)
-            else:
-                st.error(f"登録エラー: {added}")
+                if success:
+                    st.balloons()
+                    msg = f"✅ 登録処理が完了しました\n- **新規登録**: {added} 件\n"
+                    skipped_count = len(skipped_rows)
+                    if skipped_count > 0:
+                        msg += f"- **重複スキップ**: {skipped_count} 件"
+                    st.success(msg)
+
+                    if skipped_count > 0:
+                        with st.expander("⚠️ 重複によりスキップされたデータを確認する", expanded=True):
+                            st.dataframe(pd.DataFrame(skipped_rows))
+                            st.caption("※これらのデータは既存データと完全に一致したため登録されませんでした。")
+
+                    # マスタ学習
+                    new_mappings = {}
+                    for _, r in edited_df.iterrows():
+                        if r['category_1'] in ["支出", "収入"] and \
+                           r['store'] and r['store'] not in master_dict and \
+                           r['category_2'] not in ["未分類", "その他"]:
+                            new_mappings[r['store']] = r['category_2']
+                    
+                    if new_mappings:
+                        st.divider()
+                        st.write("📚 新しい店名をマスタに登録しますか？")
+                        st.json(new_mappings, expanded=False)
+                        if st.button("マスタに保存"):
+                            utils.update_category_master(new_mappings)
+                            st.toast("マスタを更新しました")
+                            master_dict.update(new_mappings)
+                else:
+                    st.error(f"登録エラー: {added}")
+            except Exception as e:
+                st.error(f"保存処理エラー: {e}")
     else:
         st.warning("有効なデータが見つかりませんでした。")
