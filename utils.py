@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 import traceback
 
 # --- 定数定義 ---
-# ★修正点: カテゴリ名を「楽天カード」→「Rカード」などに変更
 CATEGORIES = [
     "食費", "外食費", "日用品", "娯楽(遊び費用)", "被服費", "医療費", 
     "光熱費", "住居費", "通信費", "保険", "教育費", "投資", 
@@ -29,7 +28,6 @@ LOG_SHEET_NAME = "Transaction_Log"
 MASTER_SHEET_NAME = "Category_Master" 
 
 # --- 金融機関ごとの設定 ---
-# ★修正点: キー名を「R銀行」「Rカード」「R証券」に変更
 INSTITUTION_CONFIG = {
     "M銀行": { 
         "sheet_name": "Bank_DB", "encoding": "shift_jis",
@@ -45,7 +43,7 @@ INSTITUTION_CONFIG = {
         "sheet_name": "Securities_DB", "encoding": "shift_jis",
         "custom_loader": "rakuten_sec_balance" 
     },
-    # 必要に応じて他の銀行も設定
+    # 他の銀行設定
     "Y銀行": { "sheet_name": "Bank_DB", "date_col": "取引日", "store_col": "お取引内容", "amount_col": "出金金額", "encoding": "shift_jis" },
     "Iクレ": { "sheet_name": "Credit_DB", "date_col": "利用日", "store_col": "加盟店名", "amount_col": "利用金額", "encoding": "shift_jis" }
 }
@@ -79,7 +77,6 @@ def get_gspread_client():
 # --- 特殊CSV読み込み機能 ---
 
 def extract_date_from_filename(filename):
-    """ファイル名から日付(YYYYMMDD)を抽出する"""
     if not filename: return None
     match = re.search(r'(\d{8})', filename)
     if match:
@@ -90,32 +87,24 @@ def extract_date_from_filename(filename):
     return None
 
 def load_rakuten_securities_csv(file_obj, encoding="shift_jis"):
-    """
-    R証券の保有商品一覧CSVを読み込む
-    """
     try:
-        # バイナリとして読み込み
         content = file_obj.getvalue().decode(encoding)
         lines = content.splitlines()
         
         start_row = 0
         found = False
-        # 「■ 保有商品詳細」の行を探す
         for i, line in enumerate(lines):
             if "■ 保有商品詳細" in line:
-                start_row = i + 2 # 見出しの2行下からヘッダー
+                start_row = i + 2
                 found = True
                 break
         
-        if not found:
-            start_row = 0
+        if not found: start_row = 0
 
-        # メモリ上のCSVとして読み込む
         csv_io = io.StringIO("\n".join(lines[start_row:]))
         df = pd.read_csv(csv_io)
         return df
     except Exception as e:
-        # エラー時はNoneを返し、呼び出し元で処理させる
         print(f"Read Error: {e}")
         return None
 
@@ -161,7 +150,6 @@ def update_category_master(new_mappings):
     return 0
 
 def create_master_from_history():
-    """Bank_DBのみを対象にマスタを作成"""
     client = get_gspread_client()
     spreadsheet = client.open_by_key(st.secrets["SPREADSHEET_ID"])
     history_mappings = {}
@@ -184,7 +172,6 @@ def create_master_from_history():
 # --- 既存の解析・保存ロジック ---
 
 def analyze_receipt(image_bytes, mode="total"):
-    # (既存コードと同じため省略せず記述)
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     categories_str = "/".join(CATEGORIES)
@@ -226,6 +213,7 @@ def save_to_google_sheets(data):
         st.error(f"保存エラー: {e}")
         return False
 
+# ★修正点: 戻り値を変更 (skipped_count -> skipped_rows)
 def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
     client = get_gspread_client()
     try:
@@ -234,11 +222,12 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
             sheet = client.open_by_key(spreadsheet_id).worksheet(target_sheet_name)
         except gspread.WorksheetNotFound:
             st.error(f"エラー: シート '{target_sheet_name}' が見つかりません。")
-            return False, "Sheet not found", 0
+            return False, "Sheet not found", []
 
         existing_data = sheet.get_all_values()
         existing_signatures = set()
 
+        # 既存データのシグネチャ作成（重複判定用）
         if len(existing_data) > 1:
             for row in existing_data[1:]:
                 if len(row) < 7: continue 
@@ -256,7 +245,7 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
 
         now_jst = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
         rows_to_append = []
-        skipped_count = 0
+        skipped_rows = [] # 重複データを格納するリスト
 
         for _, row in df_to_save.iterrows():
             raw_bal = row.get('balance', '')
@@ -278,16 +267,17 @@ def save_bulk_to_google_sheets(df_to_save, target_sheet_name, institution_name):
                 ])
                 existing_signatures.add(new_signature)
             else:
-                skipped_count += 1
+                # 重複した行データを保存
+                skipped_rows.append(row.to_dict())
             
         if rows_to_append:
             sheet.append_rows(rows_to_append)
-            return True, len(rows_to_append), skipped_count
+            return True, len(rows_to_append), skipped_rows
         else:
-            return True, 0, skipped_count
+            return True, 0, skipped_rows
 
     except Exception as e:
-        return False, str(e), 0
+        return False, str(e), []
 
 def load_data_from_sheets():
     client = get_gspread_client()
